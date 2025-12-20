@@ -1,0 +1,251 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-background: #ffffff;
+  --color-foreground: #000000;
+
+  --color-card: #ffffff;
+  --color-card-foreground: #000000;
+
+  --color-popover: #ffffff;
+  --color-popover-foreground: #000000;
+
+  --color-primary: #000000;
+  --color-primary-foreground: #ffffff;
+
+  --color-secondary: #ffffff;
+  --color-secondary-foreground: #000000;
+
+  --color-muted: #f2f2f2;
+  --color-muted-foreground: #666666;
+
+  --color-accent: #f2f2f2;
+  --color-accent-foreground: #000000;
+
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #fafafa;
+
+  --color-border: #eeeeee;
+  --color-input: #eeeeee;
+  --color-ring: #000000;
+
+  --color-chart-1: #000000;
+  --color-chart-2: #666666;
+  --color-chart-3: #eeeeee;
+  --color-chart-4: #f2f2f2;
+  --color-chart-5: #ffffff;
+
+  --color-sidebar: #ffffff;
+  --color-sidebar-foreground: #666666;
+  --color-sidebar-primary: #000000;
+  --color-sidebar-primary-foreground: #ffffff;
+  --color-sidebar-accent: #f2f2f2;
+  --color-sidebar-accent-foreground: #000000;
+  --color-sidebar-border: #eeeeee;
+  --color-sidebar-ring: #000000;
+
+  --color-glass: rgba(255, 255, 255, 0.1);
+  --color-overlay: rgba(0, 0, 0, 0.45);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-bricolage-grotesque), var(--font-inter), sans-serif;
+
+  --color-primary-blue: #2A9DFF;
+  --color-primary-blue-hover: #1A8DFF;
+
+  --radius-lg: 32px;
+  --radius-md: 24px;
+  --radius-sm: 16px;
+  --radius-full: 9999px;
+
+  --animate-accordion-down: accordion-down 0.2s ease-out;
+  --animate-accordion-up: accordion-up 0.2s ease-out;
+
+  @keyframes accordion-down {
+    from {
+      height: 0;
+    }
+    to {
+      height: var(--radix-accordion-content-height);
+    }
+  }
+  @keyframes accordion-up {
+    from {
+      height: var(--radix-accordion-content-height);
+    }
+    to {
+      height: 0;
+    }
+  }
+}
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: #eeeeee;
+  }
+}
+
+@layer base {
+  :root {
+    --background: #ffffff;
+    --foreground: #000000;
+    --card: #ffffff;
+    --card-foreground: #000000;
+    --popover: #ffffff;
+    --popover-foreground: #000000;
+    --primary: #000000;
+    --primary-foreground: #ffffff;
+    --secondary: #ffffff;
+    --secondary-foreground: #000000;
+    --muted: #f2f2f2;
+    --muted-foreground: #666666;
+    --accent: #f2f2f2;
+    --accent-foreground: #000000;
+    --destructive: #ef4444;
+    --destructive-foreground: #fafafa;
+    --border: #eeeeee;
+    --input: #eeeeee;
+    --ring: #000000;
+    --radius: 12px;
+    --sidebar-background: #ffffff;
+    --sidebar-foreground: #666666;
+    --sidebar-primary: #000000;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #f2f2f2;
+    --sidebar-accent-foreground: #000000;
+    --sidebar-border: #eeeeee;
+    --sidebar-ring: #000000;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans selection:bg-black selection:text-white;
+    position: relative;
+    min-height: 100vh;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: 
+      radial-gradient(circle at 0% 0%, rgba(0, 163, 255, 0.03) 0%, transparent 50%),
+      radial-gradient(circle at 100% 100%, rgba(0, 163, 255, 0.03) 0%, transparent 50%),
+      radial-gradient(circle at 100% 0%, rgba(0, 0, 0, 0.02) 0%, transparent 50%),
+      radial-gradient(circle at 0% 100%, rgba(0, 0, 0, 0.02) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  .noise-bg {
+    position: fixed;
+    top: -50%;
+    left: -50%;
+    right: -50%;
+    bottom: -50%;
+    width: 200%;
+    height: 200%;
+    background: transparent url('http://assets.iceable.com/img/noise-transparent.png') repeat 0 0;
+    background-repeat: repeat;
+    animation: noise 0.2s infinite;
+    opacity: 0.04;
+    visibility: visible;
+    z-index: 5;
+    pointer-events: none;
+  }
+
+  @keyframes noise {
+    0% { transform: translate(0,0) }
+    10% { transform: translate(-5%,-5%) }
+    20% { transform: translate(-10%,5%) }
+    30% { transform: translate(5%,-10%) }
+    40% { transform: translate(-5%,15%) }
+    50% { transform: translate(-10%,5%) }
+    60% { transform: translate(15%,0) }
+    70% { transform: translate(0,10%) }
+    80% { transform: translate(-15%,0) }
+    90% { transform: translate(10%,5%) }
+    100% { transform: translate(5%,0) }
+  }
+
+  .font-bricolage {
+    font-family: var(--font-bricolage-grotesque), sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-display {
+    font-family: var(--font-bricolage-grotesque), sans-serif;
+    letter-spacing: -0.04em;
+  }
+
+  h1 {
+    font-size: 64px;
+    font-weight: 850;
+    line-height: 0.95;
+  }
+
+  h2 {
+    font-size: 32px;
+    font-weight: 800;
+    line-height: 1.05;
+  }
+
+  .btn-pill {
+    @apply rounded-full px-6 py-2.5 font-semibold transition-all duration-300;
+  }
+
+  .btn-primary-blue {
+    background-color: var(--color-primary-blue);
+    color: white;
+  }
+
+  .btn-primary-blue:hover {
+    background-color: var(--color-primary-blue-hover);
+    transform: scale(1.02);
+  }
+
+  .container {
+    width: 100%;
+    max-width: 1280px;
+    margin-left: auto;
+    margin-right: auto;
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  .glass-panel {
+    background-color: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(0, 0, 0, 0.05);
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
