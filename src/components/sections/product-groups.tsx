@@ -154,44 +154,8 @@ const ProductGroup = ({ title, subtitle, icon, products, seeMoreHref }: ProductG
 };
 
 const ProductGroups = () => {
-  const groups = [
-    {
-      title: "Prepaid Cards",
-      subtitle: "Prepaid Essentials",
-      icon: <CreditCard className="w-5 h-5" />,
-      seeMoreHref: "/gift-cards/united-states/prepaid-cards",
-      products: [
-        { name: "Swype Global Virtual Mastercard® upto $499", priceRange: "$100 - $499", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/object/public/test-clones/cdcacc15-0922-42c0-8532-9fd8d387c6ab-spendcrypto-com/assets/images/images_1.png" },
-        { name: "Swype Global Virtual MasterCard® upto $999", priceRange: "$500 - $999", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/object/public/test-clones/cdcacc15-0922-42c0-8532-9fd8d387c6ab-spendcrypto-com/assets/images/images_2.png", discount: "2%" },
-        { name: "Swype Global Virtual MasterCard® upto $5000", priceRange: "$1,000 - $5,000", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/object/public/test-clones/cdcacc15-0922-42c0-8532-9fd8d387c6ab-spendcrypto-com/assets/images/images_3.png" },
-        { name: "Visa Prepaid Card", priceRange: "$50 - $500", imageUrl: "https://cf.spendcrypto.com/cdn-cgi/imagedelivery/6c6yD_T6YhEUbCD7KBHwGQ/2d89ae83-3e11-4770-e698-f29e3a6c9d00/public" },
-      ]
-    },
-    {
-      title: "Ecommerce",
-      subtitle: "Just Buy It",
-      icon: <ShoppingBag className="w-5 h-5" />,
-      seeMoreHref: "/gift-cards/united-states/ecommerce",
-      products: [
-          { name: "Amazon.com", priceRange: "$10 - $2,000", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain" },
-        { name: "Apple", priceRange: "$10 - $500", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177192472.png" },
-          { name: "Walmart", priceRange: "$10 - $500", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T005009.811-1766181015323.png?width=8000&height=8000&resize=contain", discount: "3%" },
-        { name: "eBay", priceRange: "$25 - $200", imageUrl: "https://cf.spendcrypto.com/cdn-cgi/imagedelivery/6c6yD_T6YhEUbCD7KBHwGQ/2d89ae83-3e11-4770-e698-f29e3a6c9d00/public" },
-      ]
-    },
-    {
-      title: "Quick Commerce",
-      subtitle: "Get it in 10 mins",
-      icon: <Zap className="w-5 h-5" />,
-      seeMoreHref: "/gift-cards/united-states/quick-commerce",
-        products: [
-          { name: "DoorDash", priceRange: "$15 - $500", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177180674.png", discount: "5%" },
-          { name: "Uber Eats", priceRange: "$15 - $150", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177226936.png" },
-          { name: "Instacart", priceRange: "$25 - $250", imageUrl: "https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177278702.png" },
-          { name: "Domino's", priceRange: "$5 - $100", imageUrl: "https://cf.spendcrypto.com/cdn-cgi/imagedelivery/6c6yD_T6YhEUbCD7KBHwGQ/5980a322-9988-466d-1bf9-2e0616110900/public" },
-        ]
-    },
-  ];
+  // Product groups will be loaded from on-chain data
+  const groups: any[] = [];
 
   return (
     <div className="bg-background w-full pb-16">

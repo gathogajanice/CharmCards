@@ -19,6 +19,8 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
+  // Note: Turbopack handles dependencies differently than webpack
+  // Optional wallet dependencies should be installed if needed
 } as NextConfig;
 
 export default nextConfig;

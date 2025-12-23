@@ -3,21 +3,63 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Search, Menu, ShoppingCart, User, X, ChevronRight, LogOut, Wallet } from "lucide-react";
+import { Search, Menu, ShoppingCart, User, X, ChevronRight, LogOut, Wallet, Coins, Network, CheckCircle2, AlertCircle, Bitcoin } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 import { useCart } from '@/context/CartContext';
 import { useAppKit, useAppKitAccount } from "@reown/appkit/react";
+import { useNetworkCheck } from '@/hooks/use-network-check';
+import NetworkSwitchModal from '@/components/ui/network-switch-modal';
+import TestnetFaucet from '@/components/ui/testnet-faucet';
+import { attemptNetworkSwitch, detectWalletName, getNetworkFromWallet } from '@/lib/charms/network';
+import { getWalletBalance } from '@/lib/charms/wallet';
 
 export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [showFaucet, setShowFaucet] = useState(false);
   const [isScrolled, setIsScrolled] = useState(false);
+  const [balance, setBalance] = useState<number | null>(null);
+  const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const pathname = usePathname();
   const { cartItems } = useCart();
   const { open } = useAppKit();
   const { address, isConnected } = useAppKitAccount();
+  const {
+    currentNetwork,
+    isOnCorrectNetwork,
+    showNetworkModal,
+    setShowNetworkModal,
+  } = useNetworkCheck();
 
   const cartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
+
+  // Fetch wallet balance
+  useEffect(() => {
+    const fetchBalance = async () => {
+      if (!address || !isConnected) {
+        setBalance(null);
+        return;
+      }
+
+      setIsLoadingBalance(true);
+      try {
+        const walletBalance = await getWalletBalance(address, null);
+        if (walletBalance !== null && walletBalance !== undefined) {
+          setBalance(walletBalance);
+        }
+      } catch (error) {
+        console.error('Failed to fetch balance:', error);
+        setBalance(null);
+      } finally {
+        setIsLoadingBalance(false);
+      }
+    };
+
+    fetchBalance();
+    // Refresh balance every 10 seconds
+    const interval = setInterval(fetchBalance, 10000);
+    return () => clearInterval(interval);
+  }, [address, isConnected]);
 
   const hasHeroBanner = pathname === "/" || pathname === "/categories";
 
@@ -86,54 +128,112 @@ export default function Navbar() {
         </div>
 
         <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
-            <motion.div
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              className="hidden md:block"
-            >
-              <button 
-                onClick={() => open()}
-                className={`group flex items-center h-11 px-8 rounded-full text-[14px] font-black uppercase tracking-wider transition-all duration-300 font-bricolage ${
-                  isConnected
-                    ? (!isTransparent ? "bg-black/5 text-black hover:bg-black/10" : "bg-white/10 text-white hover:bg-white/20 border border-white/20")
-                    : (!isTransparent 
-                      ? "bg-[#2A9DFF] text-white hover:bg-[#1A8DFF] shadow-[0_4px_15px_rgba(42,157,255,0.3)]" 
-                      : "bg-white text-[#2A9DFF] hover:bg-white/95 shadow-[0_8px_25px_rgba(0,0,0,0.15)]")
-                }`}
+            {/* Wallet Connection with Balance and Network Badge */}
+            <div className="hidden md:flex items-center gap-2">
+              {/* BTC Balance - Show when connected */}
+              {isConnected && balance !== null && (
+                <motion.div
+                  whileHover={{ scale: 1.02 }}
+                  whileTap={{ scale: 0.98 }}
+                  className={`flex items-center gap-2 h-11 px-4 rounded-full text-[13px] font-bold transition-all duration-300 ${
+                    !isTransparent 
+                      ? "bg-[#2A9DFF]/10 text-[#2A9DFF] border border-[#2A9DFF]/20" 
+                      : "bg-white/20 text-white border border-white/30"
+                  }`}
+                >
+                  <Bitcoin size={16} />
+                  <span className="font-black">
+                    {isLoadingBalance ? '...' : formatBalance(balance)} BTC
+                  </span>
+                </motion.div>
+              )}
+
+              <motion.div
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
               >
-                <span>{isConnected ? `${address?.slice(0, 6)}...${address?.slice(-4)}` : "Connect"}</span>
-                <ChevronRight size={16} className="ml-1 transition-transform group-hover:translate-x-1" />
-              </button>
-            </motion.div>
+                <button 
+                  onClick={() => open()}
+                  className={`group flex items-center h-11 px-6 rounded-full text-[14px] font-black uppercase tracking-wider transition-all duration-300 font-bricolage ${
+                    isConnected
+                      ? (!isTransparent ? "bg-black/5 text-black hover:bg-black/10" : "bg-white/10 text-white hover:bg-white/20 border border-white/20")
+                      : (!isTransparent 
+                        ? "bg-[#2A9DFF] text-white hover:bg-[#1A8DFF] shadow-[0_4px_15px_rgba(42,157,255,0.3)]" 
+                        : "bg-white text-[#2A9DFF] hover:bg-white/95 shadow-[0_8px_25px_rgba(0,0,0,0.15)]")
+                  }`}
+                >
+                  <Wallet size={16} className="mr-2" />
+                  <span>{isConnected ? `${address?.slice(0, 4)}...${address?.slice(-4)}` : "Connect"}</span>
+                  <ChevronRight size={16} className="ml-1 transition-transform group-hover:translate-x-1" />
+                </button>
+              </motion.div>
+              
+              {/* Network Badge - Show when connected */}
+              {isConnected && (
+                <motion.div
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <button
+                    onClick={async () => {
+                      if (!isOnCorrectNetwork) {
+                        const walletName = detectWalletName();
+                        await attemptNetworkSwitch(walletName || undefined);
+                        // Check network after a moment
+                        setTimeout(async () => {
+                          const network = await getNetworkFromWallet();
+                          if (network === 'testnet4' || network === 'testnet') {
+                            window.location.reload();
+                          }
+                        }, 2000);
+                      }
+                    }}
+                    className={`group flex items-center gap-2 h-11 px-4 rounded-full text-[12px] font-bold transition-all duration-300 ${
+                      isOnCorrectNetwork
+                        ? (!isTransparent 
+                          ? "bg-green-500/10 text-green-600 border border-green-500/20 hover:bg-green-500/20" 
+                          : "bg-green-500/20 text-green-300 border border-green-500/30 hover:bg-green-500/30")
+                        : (!isTransparent 
+                          ? "bg-red-500/10 text-red-600 border border-red-500/20 hover:bg-red-500/20 cursor-pointer" 
+                          : "bg-red-500/20 text-red-300 border border-red-500/30 hover:bg-red-500/30 cursor-pointer")
+                    }`}
+                    title={isOnCorrectNetwork ? "Network: Testnet4 ✓" : "Click to switch to Testnet4"}
+                  >
+                    {isOnCorrectNetwork ? (
+                      <CheckCircle2 size={14} className="text-green-600" />
+                    ) : (
+                      <AlertCircle size={14} className="text-red-600" />
+                    )}
+                    <Network size={14} />
+                    <span className="font-black uppercase tracking-wider">
+                      {currentNetwork === 'testnet4' || currentNetwork === 'testnet' 
+                        ? 'Testnet4' 
+                        : currentNetwork === 'mainnet' 
+                        ? 'Mainnet' 
+                        : currentNetwork.toUpperCase()}
+                    </span>
+                    {!isOnCorrectNetwork && (
+                      <ChevronRight size={12} className="transition-transform group-hover:translate-x-1" />
+                    )}
+                  </button>
+                </motion.div>
+              )}
+            </div>
 
               <div className="flex items-center gap-2">
-                {isConnected && (
-                  <motion.div whileHover={{ scale: 1.08, y: -2 }} whileTap={{ scale: 0.92 }}>
-                    <Link
-                      href="/wallet"
-                      className={`flex items-center justify-center w-10 h-10 rounded-full border transition-all duration-300 ${
-                        !isTransparent 
-                          ? "border-black/5 bg-black/5 hover:bg-black/10 text-black" 
-                          : "border-white/10 bg-white/10 hover:bg-white/20 text-white"
-                      }`}
-                      title="My Wallet"
-                    >
-                      <Wallet size={18} strokeWidth={2} />
-                    </Link>
-                  </motion.div>
-                )}
-                {!isConnected && (
+                {/* Get Testnet BTC Button - Visible when connected on Testnet4 */}
+                {isConnected && isOnCorrectNetwork && (
                   <motion.div whileHover={{ scale: 1.08, y: -2 }} whileTap={{ scale: 0.92 }}>
                     <button
-                      onClick={() => open()}
+                      onClick={() => setShowFaucet(true)}
                       className={`flex items-center justify-center w-10 h-10 rounded-full border transition-all duration-300 ${
                         !isTransparent 
                           ? "border-black/5 bg-black/5 hover:bg-black/10 text-black" 
                           : "border-white/10 bg-white/10 hover:bg-white/20 text-white"
                       }`}
-                      title="Choose Network"
+                      title="Get Testnet4 BTC"
                     >
-                      <Wallet size={18} strokeWidth={2} />
+                      <Coins size={18} strokeWidth={2} />
                     </button>
                   </motion.div>
                 )}
@@ -203,21 +303,45 @@ export default function Navbar() {
                   {isConnected ? `${address?.slice(0, 8)}...${address?.slice(-6)}` : "Connect Wallet"}
                 </button>
                 
-                {isConnected && (
-                  <Link
-                    href="/wallet"
-                    onClick={() => setMobileMenuOpen(false)}
-                    className="flex items-center justify-center h-14 rounded-2xl border border-black/10 bg-black/5 text-black text-lg font-bold active:scale-[0.98] transition-transform gap-2"
+                {isConnected && isOnCorrectNetwork && (
+                  <button
+                    onClick={() => {
+                      setShowFaucet(true);
+                      setMobileMenuOpen(false);
+                    }}
+                    className="flex items-center justify-center h-14 rounded-2xl border border-accent/20 bg-accent/10 text-accent text-lg font-bold active:scale-[0.98] transition-transform gap-2"
                   >
-                    <Wallet size={20} />
-                    My Wallet
-                  </Link>
+                    <Coins size={20} />
+                    Get Testnet BTC
+                  </button>
+                )}
+                
+                {/* BTC Balance in Mobile Menu */}
+                {isConnected && balance !== null && (
+                  <div className="flex items-center justify-center h-14 rounded-2xl border border-[#2A9DFF]/20 bg-[#2A9DFF]/10 text-[#2A9DFF] text-lg font-bold gap-2">
+                    <Bitcoin size={20} />
+                    <span>{isLoadingBalance ? '...' : formatBalance(balance)} BTC</span>
+                  </div>
                 )}
 
             </nav>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Network Switch Modal - Shows when wrong network detected */}
+      <NetworkSwitchModal
+        isOpen={showNetworkModal}
+        onClose={() => setShowNetworkModal(false)}
+        currentNetwork={currentNetwork === 'mainnet' ? 'Mainnet' : currentNetwork === 'testnet' ? 'Testnet' : currentNetwork}
+        requiredNetwork="Testnet4"
+      />
+
+      {/* Testnet Faucet Modal */}
+      <TestnetFaucet
+        isOpen={showFaucet}
+        onClose={() => setShowFaucet(false)}
+      />
     </motion.header>
   );
 }

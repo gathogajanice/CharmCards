@@ -1,0 +1,25 @@
+version: 8
+
+apps:
+  $00: n/${app_id}/${app_vk}
+  $01: t/${app_id}/${app_vk}
+
+private_inputs:
+  $00: "${in_utxo_0}"
+
+ins:
+  - utxo_id: ${in_utxo_0}
+    charms: {}
+
+outs:
+  - address: ${recipient_address}
+    charms:
+      $00:
+        brand: "${brand}"
+        image: "${image}"
+        initial_amount: ${initial_amount}
+        expiration_date: ${expiration_date}
+        created_at: ${created_at}
+        remaining_balance: ${initial_amount}
+      $01: ${initial_amount}
+

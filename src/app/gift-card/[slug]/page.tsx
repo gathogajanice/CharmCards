@@ -10,6 +10,7 @@ import { useCart } from '@/context/CartContext';
 import { useRouter } from 'next/navigation';
 import GiftCardRedemption from '@/components/sections/gift-card-redemption';
 
+// Gift card data will be loaded from on-chain data
 const giftCardData: Record<string, {
   name: string;
   description: string;
@@ -18,198 +19,6 @@ const giftCardData: Record<string, {
     country: string;
     website?: string;
   }> = {
-    'amazon-com': {
-      name: 'Amazon.com',
-      description: 'Shop millions of products on Amazon.com with this gift card. From electronics and books to clothing and household essentials, Amazon has everything you need. Perfect for gifting or personal use.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100, 250, 500, 1000, 2000],
-      country: 'US',
-      website: 'https://amazon.com'
-    },
-    'doordash-us': {
-      name: 'DoorDash',
-      description: 'Get your favorite meals delivered straight to your door with DoorDash. Choose from thousands of restaurants in your area and enjoy the convenience of on-demand food delivery.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177180674.png',
-      denominations: [15, 25, 50, 100, 200, 500],
-      country: 'US',
-      website: 'https://doordash.com'
-    },
-    'apple-us': {
-      name: 'Apple',
-      description: 'The Apple Gift Card is the one gift for everything Apple: products, accessories, apps, games, music, movies, TV shows, iCloud+, and more. Use it at any Apple Store location, in the Apple Store app, on apple.com, in the App Store, on iTunes, and more.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177192472.png',
-      denominations: [10, 25, 50, 100, 200, 500],
-      country: 'US',
-      website: 'https://apple.com'
-    },
-    'uber-eats-us': {
-      name: 'Uber Eats',
-      description: 'Enjoy delicious meals from your local favorites with Uber Eats. Whether you crave sushi, burgers, or tacos, Uber Eats brings the best of your city to your doorstep.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177226936.png',
-      denominations: [15, 25, 50, 100, 150],
-      country: 'US',
-      website: 'https://ubereats.com'
-    },
-    'uber-us': {
-      name: 'Uber',
-      description: 'Get where you need to go with Uber. Use this gift card for rides across town or towards your next Uber Eats order. Reliable, safe, and available whenever you need it.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T134944.605-1766098833835.png?width=8000&height=8000&resize=contain',
-      denominations: [15, 25, 50, 100, 200, 500],
-      country: 'US',
-      website: 'https://uber.com'
-    },
-    'puma-us': {
-      name: 'Puma',
-      description: 'Gear up with the latest in athletic footwear, apparel, and accessories from Puma. Known for its fusion of performance and style, Puma helps you stay ahead of the game.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T003348.696-1766180069369.png?width=8000&height=8000&resize=contain',
-      denominations: [20, 30, 40, 50],
-      country: 'US',
-      website: 'https://puma.com'
-    },
-    'walmart-us': {
-      name: 'Walmart',
-      description: 'Shop Walmart for everyday low prices on everything from groceries and electronics to toys and home goods. Use your gift card in-store or online at Walmart.com.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T005009.811-1766181015323.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100, 250, 500],
-      country: 'US',
-      website: 'https://walmart.com'
-    },
-    'airbnb-us': {
-      name: 'Airbnb',
-      description: 'Discover unique stays and experiences around the world with Airbnb. From cozy cabins to luxury villas, Airbnb connects you with unforgettable travel opportunities.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T003720.667-1766180247288.png?width=8000&height=8000&resize=contain',
-      denominations: [50, 100, 200, 500],
-      country: 'US',
-      website: 'https://airbnb.com'
-    },
-    'netflix-us': {
-      name: 'Netflix',
-      description: 'Watch your favorite movies and TV shows anytime, anywhere with a Netflix gift card. Enjoy unlimited streaming of original series, documentaries, and more.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T010616.484-1766182009151.png?width=8000&height=8000&resize=contain',
-      denominations: [15, 25, 50, 100],
-      country: 'US',
-      website: 'https://netflix.com'
-    },
-    'starbucks-us': {
-      name: 'Starbucks',
-      description: 'The Starbucks Gift Card is the perfect way to pay for your favorite coffee, food, and more. Enjoy the convenience of mobile ordering and earn rewards with every purchase.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T010825.448-1766182140763.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100, 150],
-      country: 'US',
-      website: 'https://starbucks.com'
-    },
-    'feastables-us': {
-      name: 'Feastables',
-      description: 'Indulge in the delicious taste of Feastables by MrBeast. Made with simple, organic ingredients, Feastables chocolate bars are a treat you can feel good about.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T142249.733-1766098833699.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100],
-      country: 'US',
-      website: 'https://feastables.com'
-    },
-    'apple-music-us': {
-      name: 'Apple Music',
-      description: 'Experience millions of songs, curated playlists, and exclusive content with Apple Music. Stream your favorite artists ad-free and across all your devices.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T141006.993-1766098833813.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100],
-      country: 'US',
-      website: 'https://music.apple.com'
-    },
-    'canva-us': {
-      name: 'Canva',
-      description: 'Design anything with Canva. From social media posts and presentations to flyers and more, Canva\'s intuitive tools make design easy for everyone.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T140457.719-1766098833706.png?width=8000&height=8000&resize=contain',
-      denominations: [25, 50, 100, 200],
-      country: 'US',
-      website: 'https://canva.com'
-    },
-    'dominos-us': {
-      name: 'Dominos',
-      description: 'Satisfy your pizza cravings with Dominos. Order online for delivery or carryout and enjoy a wide variety of pizzas, sides, and desserts.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T140110.777-1766098833764.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100],
-      country: 'US',
-      website: 'https://dominos.com'
-    },
-    'spotify-us': {
-      name: 'Spotify',
-      description: 'Get Spotify Premium and listen to your favorite music ad-free, offline, and in high-quality audio. With Spotify, your next favorite song is just a click away.',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/thumb/1/19/Spotify_logo_without_text.svg/2048px-Spotify_logo_without_text.svg.png',
-      denominations: [10, 30, 60],
-      country: 'US',
-      website: 'https://spotify.com'
-    },
-    'target-us': {
-      name: 'Target',
-      description: 'Expect more and pay less at Target. Use your gift card for everything from apparel and beauty to electronics and grocery items, in-store or at Target.com.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177237708.png',
-      denominations: [10, 25, 50, 100, 250, 500],
-      country: 'US',
-      website: 'https://target.com'
-    },
-    'best-buy-us': {
-      name: 'Best Buy',
-      description: 'Best Buy is your destination for the latest in technology and home electronics. Use your gift card for computers, TVs, appliances, and more.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177258131.png',
-      denominations: [25, 50, 100, 250, 500],
-      country: 'US',
-      website: 'https://bestbuy.com'
-    },
-    'chatgpt-us': {
-      name: 'ChatGPT',
-      description: 'Unlock the power of AI with ChatGPT Plus. Get early access to new features, faster response times, and enhanced capabilities with Anthropic\'s most capable model.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T011019.453-1766182223658.png?width=8000&height=8000&resize=contain',
-      denominations: [20, 50, 100, 200, 500],
-      country: 'US',
-      website: 'https://chatgpt.com'
-    },
-    'sephora-us': {
-      name: 'Sephora',
-      description: 'Shop the latest beauty products, makeup, skincare and more at Sephora. Discover the best in prestige beauty from top brands.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T011402.613-1766182450035.png?width=8000&height=8000&resize=contain',
-      denominations: [10, 25, 50, 100, 250, 500],
-      country: 'US',
-      website: 'https://sephora.com'
-    },
-    'claude-us': {
-      name: 'Claude',
-      description: 'Experience next-generation AI with Claude. Build, create, and explore with Anthropic\'s most capable model, designed for safety and intelligence.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T011717.532-1766182645152.png?width=8000&height=8000&resize=contain',
-      denominations: [20, 50, 100, 200, 500],
-      country: 'US',
-      website: 'https://claude.ai'
-    },
-    'steam-us': {
-      name: 'Steam',
-      description: 'The ultimate destination for playing, discussing, and creating games. Use your Steam Gift Card to add funds to your Steam Wallet and purchase your favorite games.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T003829.102-1766180323994.png?width=8000&height=8000&resize=contain',
-      denominations: [25, 50, 100, 200],
-      country: 'US',
-      website: 'https://steampowered.com'
-    },
-    'google-play-us': {
-      name: 'Google Play',
-      description: 'Google Play is your entertainment unbound. It brings together all of the entertainment you love and helps you explore it in new ways, anytime, anywhere.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177297240.png',
-      denominations: [10, 25, 50, 100, 200],
-      country: 'US',
-      website: 'https://play.google.com'
-    },
-    'pampers-us': {
-      name: 'Pampers',
-      description: 'Pampers is the #1 choice of hospitals, nurses and parents for baby comfort and protection. Use this gift card for all your baby care needs.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T005905.360-1766181587248.png?width=8000&height=8000&resize=contain',
-      denominations: [25, 50, 100],
-      country: 'US',
-      website: 'https://pampers.com'
-    },
-    'nike-us': {
-      name: 'Nike',
-      description: 'The world\'s leading athletic brand. Gear up for your best performance with Nike footwear, apparel, and equipment.',
-      image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T004830.670-1766180915054.png?width=8000&height=8000&resize=contain',
-      denominations: [25, 50, 100, 250, 500],
-      country: 'US',
-      website: 'https://nike.com'
-    },
   };
 
 
@@ -217,7 +26,27 @@ export default function GiftCardPage() {
   const params = useParams();
   const router = useRouter();
   const slug = params.slug as string;
-  const card = giftCardData[slug] || giftCardData['amazon-com'];
+  // Gift card data will be loaded from on-chain data
+  const card = giftCardData[slug] || null;
+  
+  if (!card) {
+    return (
+      <div className="min-h-screen bg-white">
+        <Navbar />
+        <div className="container mx-auto px-6 py-32 text-center">
+          <h1 className="text-3xl font-bold mb-4">Gift Card Not Found</h1>
+          <p className="text-muted-foreground mb-8">This gift card will be available after minting on-chain.</p>
+          <button
+            onClick={() => router.push('/')}
+            className="px-6 py-3 bg-primary text-white rounded-full font-medium hover:bg-primary/90"
+          >
+            Go Home
+          </button>
+        </div>
+        <Footer />
+      </div>
+    );
+  }
   
   const [selectedAmount, setSelectedAmount] = useState<number | null>(null);
   const [quantity, setQuantity] = useState(1);
@@ -501,17 +330,16 @@ export default function GiftCardPage() {
                   </div>
                 </div>
 
-                {/* Redemption Interface */}
-                <GiftCardRedemption
+                {/* Redemption Interface - Will be populated from on-chain data */}
+                {/* <GiftCardRedemption
                   brand={card.name}
-                  currentBalance={85.50}
-                  maxBalance={100}
+                  currentBalance={0}
+                  maxBalance={0}
                   onRedeem={async (amount) => {
-                    // Mock redemption - replace with actual Charms integration
+                    // On-chain redemption will be implemented
                     console.log('Redeeming:', amount);
-                    await new Promise(resolve => setTimeout(resolve, 2000));
                   }}
-                />
+                /> */}
           </div>
         </div>
       </main>
