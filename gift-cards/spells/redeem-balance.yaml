@@ -1,0 +1,30 @@
+version: 8
+
+apps:
+  $00: n/${app_id}/${app_vk}
+  $01: t/${app_id}/${app_vk}
+
+ins:
+  - utxo_id: ${in_utxo_0}
+    charms:
+      $00:
+        brand: "${brand}"
+        image: "${image}"
+        initial_amount: ${initial_amount}
+        expiration_date: ${expiration_date}
+        created_at: ${created_at}
+        remaining_balance: ${current_balance}
+      $01: ${current_balance}
+
+outs:
+  - address: ${user_address}
+    charms:
+      $00:
+        brand: "${brand}"
+        image: "${image}"
+        initial_amount: ${initial_amount}
+        expiration_date: ${expiration_date}
+        created_at: ${created_at}
+        remaining_balance: ${remaining_balance}
+      $01: ${remaining_balance}
+

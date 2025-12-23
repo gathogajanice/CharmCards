@@ -1,48 +1,112 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Navbar from '@/components/sections/navbar';
 import Footer from '@/components/sections/footer';
 import { motion } from 'framer-motion';
-import { Send, ExternalLink, Copy, Check, Wallet } from 'lucide-react';
+import { Send, ExternalLink, Copy, Check, Wallet, Network, Bitcoin, RefreshCw } from 'lucide-react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-
-// Mock data for owned gift cards (NFTs)
-const mockGiftCards = [
-  {
-    id: '1',
-    brand: 'Amazon.com',
-    image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain',
-    balance: 85.50,
-    originalAmount: 100,
-    expirationDate: '2025-12-31',
-    tokenId: '0x1234...5678',
-    transactionHash: '0xabcd...efgh',
-    purchaseDate: '2024-01-15',
-    category: 'Shopping',
-  },
-  {
-    id: '2',
-    brand: 'Uber',
-    image: 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T134944.605-1766098833835.png?width=8000&height=8000&resize=contain',
-    balance: 50.00,
-    originalAmount: 50,
-    expirationDate: null,
-    tokenId: '0x2345...6789',
-    transactionHash: '0xbcde...fghi',
-    purchaseDate: '2024-02-20',
-    category: 'Travel',
-  },
-];
+import { useAppKitAccount } from '@reown/appkit/react';
+import { getWalletUtxos, getWalletBalance } from '@/lib/charms/wallet';
+import { detectNetworkFromAddress } from '@/lib/charms/network';
+import { useNetworkCheck } from '@/hooks/use-network-check';
 
 export default function WalletPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [balance, setBalance] = useState<number | null>(null);
+  const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const router = useRouter();
+  const { address, isConnected } = useAppKitAccount();
+  const { currentNetwork } = useNetworkCheck();
 
-  const totalBalance = mockGiftCards.reduce((sum, card) => sum + card.balance, 0);
-  const totalCards = mockGiftCards.length;
+  // Fetch wallet balance - try wallet first, then UTXOs
+  useEffect(() => {
+    const fetchBalance = async () => {
+      if (!address || !isConnected) {
+        setBalance(null);
+        return;
+      }
+
+      setIsLoadingBalance(true);
+      try {
+        // First try to get balance directly from wallet (most accurate)
+        let walletBalance = await getWalletBalance(address, null);
+        
+        if (walletBalance !== null && walletBalance !== undefined) {
+          console.log('Balance from wallet:', walletBalance);
+          setBalance(walletBalance);
+        } else {
+          // Fallback: calculate from UTXOs
+          console.log('Wallet balance not available, calculating from UTXOs...');
+          const utxos = await getWalletUtxos(address, null);
+          // Sum all UTXO values (in satoshis, convert to BTC)
+          const totalSats = utxos.reduce((sum, utxo) => sum + utxo.value, 0);
+          const totalBTC = totalSats / 100000000; // Convert satoshis to BTC
+          console.log('Balance from UTXOs:', totalBTC, 'BTC (', totalSats, 'sats)');
+          setBalance(totalBTC);
+        }
+      } catch (error) {
+        console.error('Failed to fetch balance:', error);
+        setBalance(null);
+      } finally {
+        setIsLoadingBalance(false);
+      }
+    };
+
+    fetchBalance();
+    
+    // Refresh balance every 10 seconds
+    const interval = setInterval(fetchBalance, 10000);
+    return () => clearInterval(interval);
+  }, [address, isConnected]);
+
+  // Detect network from address
+  const network = address ? detectNetworkFromAddress(address) : 'unknown';
+  const networkDisplayName = network === 'testnet4' ? 'Bitcoin Testnet4' : 
+                            network === 'mainnet' ? 'Bitcoin Mainnet' :
+                            network === 'testnet' ? 'Bitcoin Testnet' : 'Unknown';
+
+  const giftCards: any[] = []; // Empty array - will be populated from on-chain data
+  const totalBalance = 0; // Will be calculated from actual gift cards
+  const totalCards = 0;
+
+  // Format balance to show up to 2 decimal places, removing trailing zeros
+  const formatBalance = (bal: number | null): string => {
+    if (bal === null || bal === undefined) return '0';
+    // Round to 2 decimal places and remove trailing zeros
+    const rounded = Math.round(bal * 100) / 100;
+    return rounded.toFixed(2).replace(/\.?0+$/, '');
+  };
+
+  // Manual refresh balance function
+  const refreshBalance = async () => {
+    if (!address || !isConnected) return;
+    
+    setIsLoadingBalance(true);
+    try {
+      // First try to get balance directly from wallet (most accurate)
+      let walletBalance = await getWalletBalance(address, null);
+      
+      if (walletBalance !== null && walletBalance !== undefined) {
+        console.log('Refreshed balance from wallet:', walletBalance);
+        setBalance(walletBalance);
+      } else {
+        // Fallback: calculate from UTXOs
+        console.log('Wallet balance not available, calculating from UTXOs...');
+        const utxos = await getWalletUtxos(address, null);
+        const totalSats = utxos.reduce((sum, utxo) => sum + utxo.value, 0);
+        const totalBTC = totalSats / 100000000;
+        console.log('Refreshed balance from UTXOs:', totalBTC, 'BTC');
+        setBalance(totalBTC);
+      }
+    } catch (error) {
+      console.error('Failed to refresh balance:', error);
+    } finally {
+      setIsLoadingBalance(false);
+    }
+  };
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -81,37 +145,70 @@ export default function WalletPage() {
           </p>
         </div>
 
-        {/* Stats - Only show if user has cards */}
-        {mockGiftCards.length > 0 && (
-          <div className="flex flex-wrap items-center gap-3 sm:gap-4 mb-12 sm:mb-16">
-            <motion.div 
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3, delay: 0.1 }}
-              className="flex items-center gap-3"
-            >
-              <div className="text-right">
-                <p className="text-[11px] text-black/40 uppercase tracking-wider font-medium mb-1">Total Balance</p>
-                <p className="text-[24px] sm:text-[28px] font-black text-black font-bricolage leading-none">${totalBalance.toFixed(2)}</p>
+        {/* Wallet Info - Network and Balance */}
+        {isConnected && address && (
+          <div className="mb-8 p-6 bg-black/5 rounded-2xl border border-black/10">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="flex-1">
+                <div className="flex items-center gap-3 mb-2">
+                  <Network className="w-4 h-4 text-black/60" />
+                  <span className="text-[11px] text-black/40 uppercase tracking-wider font-medium">Network</span>
+                </div>
+                <p className="text-[18px] font-black text-black font-bricolage">
+                  {networkDisplayName}
+                  {network === 'testnet4' && (
+                    <span className="ml-2 text-[12px] text-black/50 font-normal">(Bitcoin Testnet4 Beta in Unisat)</span>
+                  )}
+                </p>
+                {address && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-[11px] text-black/40 font-mono">{address.slice(0, 8)}...{address.slice(-6)}</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(address);
+                        setCopiedId('address');
+                        setTimeout(() => setCopiedId(null), 2000);
+                      }}
+                      className="text-black/40 hover:text-black transition-colors"
+                    >
+                      {copiedId === 'address' ? (
+                        <Check className="w-3 h-3" />
+                      ) : (
+                        <Copy className="w-3 h-3" />
+                      )}
+                    </button>
+                  </div>
+                )}
               </div>
-            </motion.div>
-            <div className="w-px h-8 bg-black/10" />
-            <motion.div 
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.3, delay: 0.15 }}
-              className="flex items-center gap-3"
-            >
               <div className="text-right">
-                <p className="text-[11px] text-black/40 uppercase tracking-wider font-medium mb-1">Cards</p>
-                <p className="text-[24px] sm:text-[28px] font-black text-black font-bricolage leading-none">{totalCards}</p>
+                <div className="flex items-center justify-end gap-2 mb-2">
+                  <Bitcoin className="w-4 h-4 text-black/60" />
+                  <span className="text-[11px] text-black/40 uppercase tracking-wider font-medium">Balance</span>
+                  <button
+                    onClick={refreshBalance}
+                    disabled={isLoadingBalance}
+                    className="w-5 h-5 rounded-full flex items-center justify-center hover:bg-black/10 transition-colors disabled:opacity-50"
+                    title="Refresh balance"
+                  >
+                    <RefreshCw className={`w-3 h-3 text-black/60 ${isLoadingBalance ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+                {isLoadingBalance ? (
+                  <p className="text-[18px] font-black text-black font-bricolage">Loading...</p>
+                ) : balance !== null ? (
+                  <p className="text-[18px] font-black text-black font-bricolage">
+                    {formatBalance(balance)} BTC
+                  </p>
+                ) : (
+                  <p className="text-[18px] font-black text-black/40 font-bricolage">—</p>
+                )}
               </div>
-            </motion.div>
+            </div>
           </div>
         )}
 
         {/* Gift Cards Grid */}
-        {mockGiftCards.length === 0 ? (
+        {giftCards.length === 0 ? (
           <div className="text-center py-24">
             <Wallet className="w-12 h-12 text-black/10 mx-auto mb-4" />
             <p className="text-black/50 text-[14px] mb-1 font-medium">No gift cards yet</p>
@@ -119,7 +216,7 @@ export default function WalletPage() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-            {mockGiftCards.map((card, index) => (
+            {giftCards.map((card, index) => (
               <motion.div
                 key={card.id}
                 initial={{ opacity: 0, y: 10 }}

@@ -45,15 +45,14 @@ createAppKit({
     socials: []
   },
   includeWalletIds: [
-    'be49f0a78d6ea1beed3804c3a6b62ea71f568d58d9df8097f3d61c7c9baf273d', // Unisat
-    'e58b292e92c253907c1b5046200236a6', // Xverse
-    'af6b32df50ef020f666755497ee35889', // Phantom
-    '1ae152b1263d893f40f065363b96324d', // Leather
+    'be49f0a78d6ea1beed3804c3a6b62ea71f568d58d9df8097f3d61c7c9baf273d', // Unisat - Bitcoin wallet (Charms-compatible)
+    'e58b292e92c253907c1b5046200236a6', // Xverse - Bitcoin wallet (Charms-compatible)
+    '1ae152b1263d893f40f065363b96324d', // Leather - Bitcoin wallet (Charms-compatible)
   ],
   featuredWalletIds: [
-    'be49f0a78d6ea1beed3804c3a6b62ea71f568d58d9df8097f3d61c7c9baf273d',
-    'e58b292e92c253907c1b5046200236a6',
-    'af6b32df50ef020f666755497ee35889',
+    'be49f0a78d6ea1beed3804c3a6b62ea71f568d58d9df8097f3d61c7c9baf273d', // Unisat
+    'e58b292e92c253907c1b5046200236a6', // Xverse
+    '1ae152b1263d893f40f065363b96324d', // Leather
   ],
   allWallets: 'show', 
   themeMode: 'light',

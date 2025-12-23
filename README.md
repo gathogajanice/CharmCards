@@ -1,393 +1,350 @@
-# CharmyGifts - Gift Cards on Bitcoin
+# Charm Cards - Programmable Bitcoin Gift Cards
 
-> A decentralized gift card platform where merchants create gift cards that land directly in your Bitcoin wallet as NFTs. Secure, transferable, and programmable. Powered by Charms.
+**Create, transfer, and redeem programmable gift cards directly on Bitcoin using the Charms Protocol.**
 
-[![Built with Charms](https://img.shields.io/badge/Built%20with-Charms-orange)](https://charms.dev)
-[![Bitcoin Native](https://img.shields.io/badge/Bitcoin-Native-orange)](https://bitcoin.org)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
----
-
-## 🎯 What We're Building
-
-**CharmyGifts** is a decentralized gift card platform that enables merchants to create gift cards (Uber, Amazon, Netflix, etc.) that land directly in users' wallets as NFTs. Unlike traditional gift cards that use email codes, our gift cards are secured by Bitcoin, fully transferable, and programmable.
-
-### The Problem We Solve
-
-Traditional gift card platforms (like CoinsBee) have significant limitations:
-- ❌ **Email voucher codes** - Can be lost, stolen, or copied
-- ❌ **Not transferable** - Hard to gift or share
-- ❌ **No programmable features** - Static codes with no logic
-- ❌ **Centralized** - Company controls everything
-- ❌ **High fees** - Platform takes significant cut
-- ❌ **Geographic restrictions** - Limited availability
-
-### Our Solution
-
-- ✅ **NFTs in Wallet** - Gift cards land directly in your Bitcoin wallet
-- ✅ **Fully Transferable** - Send gift cards to anyone, anywhere
-- ✅ **Programmable** - Automatic expiration, partial redemption, custom rules
-- ✅ **Decentralized** - Secured by Bitcoin, no central authority
-- ✅ **Low Fees** - Bitcoin transaction fees (~$0.10)
-- ✅ **Global** - Works everywhere, no borders
+[![Charms Protocol](https://img.shields.io/badge/Charms-Protocol-orange)](https://charms.dev)
+[![Bitcoin Testnet4](https://img.shields.io/badge/Network-Testnet4-blue)](https://mempool.space/testnet4)
+[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 ---
 
-## 🚀 Why Charms?
+## 🎯 Overview
 
-### The Challenge
+Charm Cards enables merchants to create programmable Bitcoin gift cards as NFTs with fungible token balances. Built on the Charms Protocol, these gift cards run directly on Bitcoin with programmable logic for expiration dates, partial redemption, and transfers - all without layer-2 solutions.
 
-We needed a way to create programmable NFTs on Bitcoin that could:
-1. Store unique information (brand, amount, expiration)
-2. Manage token balances (spendable balance)
-3. Enforce programmable rules (expiration, partial redemption)
-4. Work cross-chain (Bitcoin, Ethereum, Solana)
-5. Maintain Bitcoin-level security
+### Key Features
 
-### Why Charms is Perfect
-
-**Charms is the only solution that enables:**
-
-#### 1. **Bitcoin-Native NFTs**
-- Create NFTs directly on Bitcoin (most secure blockchain)
-- No layer-2 solutions or sidechains needed
-- Leverages Bitcoin's proven security model
-
-#### 2. **Programmable Logic**
-- Custom issuance models (fair launch, airdrops)
-- Conditional transfers (expiration, balance checks)
-- Complex asset logic (partial redemption, revenue sharing)
-- All logic runs on Bitcoin via Charms
-
-#### 3. **Cross-Chain Compatibility**
-- Launch on Bitcoin, trade on Solana/Ethereum DEXs
-- No bridges required (trustless)
-- Universal compatibility (ERC-20, SPL, etc.)
-- Works with existing wallets and dApps
-
-#### 4. **Enhanced UTXO Model (EUTXO)**
-- Multiple assets in single transaction
-- Arbitrary programmable data in outputs
-- Extends Bitcoin's UTXO model for complex logic
-
-#### 5. **Zero-Knowledge Verification**
-- Cryptographically succinct proofs
-- Verifiable programs
-- Maintains trustlessness
-
-### Why Not Other Solutions?
-
-| Solution | Why It Doesn't Work |
-|----------|-------------------|
-| **Ethereum** | High gas fees, slow, expensive for users |
-| **Solana** | Less secure, can go down, not as trusted |
-| **Runes/Ordinals** | Not programmable enough, limited functionality |
-| **Layer-2 (Lightning)** | Separate chain, less secure, complex |
-| **Wrapped Tokens** | Need bridges (risky), custodians required |
-
-**Only Charms enables programmable NFTs on Bitcoin with cross-chain compatibility and automatic enforcement.**
+- ✅ **Bitcoin-Native**: Gift cards are NFTs on Bitcoin, not layer-2
+- ✅ **Programmable**: Custom logic for expiration, redemption, transfers
+- ✅ **Secure**: Leverages Bitcoin's security model
+- ✅ **User-Friendly**: Simple UI for complex blockchain operations
+- ✅ **Network Detection**: Automatically detects and prompts for Testnet4
+- ✅ **Faucet Integration**: Easy access to Testnet4 BTC
 
 ---
 
-## 💡 How It Works
+## 🏗️ App Structure
 
-### The Flow
+### Three Components
 
 ```
-Merchant Creates Gift Card → User Buys Gift Card → Gift Card Lands in Wallet → User Redeems Gift Card
+CharmCards/
+├── gift-cards/     # Charms App (Rust) - Built once, not run
+├── api/            # API Server (Node.js) - MUST RUN
+└── src/            # Frontend (Next.js) - MUST RUN
 ```
 
-### Step-by-Step
+**How they work:**
+- **`gift-cards/`**: Rust library that defines programmable logic. Built once to create WASM binary. API server uses this binary.
+- **`api/`**: Express server that bridges frontend and Charms. Must run continuously from `api/` directory.
+- **`src/`**: Next.js frontend. Must run continuously from root directory.
 
-1. **Merchant Creates Gift Card**
-   - Merchant chooses brand (Uber, Amazon, etc.)
-   - Sets amount ($50, $100, etc.)
-   - Sets expiration (optional)
-   - NFT + tokens created on Bitcoin via Charms
-
-2. **User Buys Gift Card**
-   - User browses available gift cards
-   - Selects gift card and pays with Bitcoin
-   - Gift card lands directly in wallet as NFT + tokens
-   - User owns it immediately
-
-3. **User Redeems Gift Card**
-   - User goes to brand app/website
-   - Connects wallet and redeems amount
-   - Balance decreases (NFT stays, tokens decrease)
-   - Programmable logic enforces rules automatically
-
-4. **User Can Transfer**
-   - User sends gift card to friend
-   - Friend receives NFT + tokens
-   - Friend can use at brand
+**Visual Flow:**
+```
+Frontend (src/) → API Server (api/) → Charms CLI/Prover API
+                              ↓
+                    Uses gift-cards/ WASM binary
+```
 
 ---
 
-## 🎨 Key Features
-
-### For Merchants
-
-- **Low Cost** - Bitcoin transaction fees (~$0.10)
-- **No Platform Dependency** - Decentralized on Bitcoin
-- **Programmable Features** - Custom rules, expiration, partial use
-- **Global Reach** - Works everywhere, no borders
-- **Secure** - Bitcoin-level security
-- **No Chargebacks** - Immutable transactions
-- **Customer Retention** - Transferable credits increase engagement
-
-### For Users
-
-- **Secure** - Can't be lost, stolen, or copied
-- **Transferable** - Send to anyone, anywhere
-- **Programmable** - Automatic expiration, partial redemption
-- **Self-Custody** - You control your gift cards
-- **Clear Expiration** - Know when gift cards expire
-- **Partial Use** - Spend part, keep the rest
-- **Global** - Works everywhere
-- **Lands in Wallet** - Instant ownership, no email codes
-
-### Programmable Features
-
-- ✅ **Automatic Expiration** - Gift cards expire after date
-- ✅ **Partial Redemption** - Spend part, keep the rest
-- ✅ **Balance Checking** - Can't redeem more than balance
-- ✅ **Transfer Rules** - Custom transfer logic
-- ✅ **Redemption History** - Track all redemptions
-- ✅ **Custom Rules** - Brand-specific logic
-
----
-
-## 🏗️ Technical Architecture
-
-### Core Components
-
-1. **Charms Backend (Rust)**
-   - NFT minting logic
-   - Token balance management
-   - Programmable redemption rules
-   - Expiration enforcement
-
-2. **Frontend (React/Next.js)**
-   - Merchant dashboard (create gift cards)
-   - User wallet (view gift cards)
-   - Redemption interface
-   - Buy gift cards interface
-
-3. **Charms SDK Integration**
-   - Create spells (mint, redeem)
-   - Check gift card status
-   - Get balances
-   - Transaction signing
-
-### Technology Stack
-
-- **Backend**: Rust, Charms CLI, Bitcoin
-- **Frontend**: React, Next.js, TypeScript
-- **Wallet**: Unisat, Xverse (Bitcoin wallets)
-- **Blockchain**: Bitcoin (mainnet/testnet)
-
----
-
-## 📊 Use Cases
-
-### 1. Uber Gift Card
-- Buy $50 Uber gift card
-- Gift card lands in wallet
-- Redeem $10 at Uber (balance → $40)
-- Transfer $30 to friend
-- Friend redeems at Uber
-
-### 2. Amazon Gift Card
-- Buy $100 Amazon gift card
-- Gift card lands in wallet
-- Redeem at Amazon
-- Transfer to family
-- Expiration tracking
-
-### 3. Netflix Gift Card
-- Buy subscription gift card
-- Gift card lands in wallet
-- Auto-renewal (programmable)
-- Transfer to family
-- Expiration enforcement
-
-### 4. Corporate Gifts
-- Bulk gift card distribution
-- Employee rewards
-- Corporate gifting
-- Usage tracking
-
----
-
-## 🌍 Competitive Advantage
-
-### vs. CoinsBee (Traditional Gift Cards)
-
-| Feature | CoinsBee | Our Solution |
-|---------|----------|--------------|
-| **Storage** | Email codes | NFTs in wallet |
-| **Security** | Can be lost/stolen | Can't be lost/stolen |
-| **Transferability** | Not transferable | Fully transferable |
-| **Expiration** | No enforcement | Automatic enforcement |
-| **Platform** | One platform only | Multiple platforms |
-| **Fees** | High platform fees | Low Bitcoin fees (~$0.10) |
-| **Infrastructure** | Requires platform | Uses Bitcoin network |
-| **Geographic** | Restrictions | Works globally |
-| **Authority** | Centralized | Decentralized |
-| **Features** | Static codes | Programmable |
-
----
-
-## 🎯 Vision
-
-### Short Term
-- ✅ Basic gift card creation & redemption
-- ✅ Onboard merchants (gift card companies)
-- ✅ Support major brands (Uber, Amazon, Netflix)
-- ✅ Early adopters
-
-### Medium Term
-- 🔄 Multi-brand marketplace
-- 🔄 Wallet integration
-- 🔄 Loyalty programs
-- 🔄 Corporate gift card programs
-
-### Long Term
-- 🚀 Standard for Bitcoin gift cards
-- 🚀 Multi-currency support
-- 🚀 Brand integration
-- 🚀 Trading marketplace
-- 🚀 Global gift card economy
-
----
-
-## 🔐 Security & Trust
-
-- **Bitcoin Security** - Leverages Bitcoin's proven security model
-- **Cryptographic Proofs** - zkVM provides verifiable proofs
-- **Client-Side Validation** - No reliance on external validators
-- **Trustless** - No trusted third parties
-- **Self-Custody** - Users control their gift cards
-- **Immutable** - Transactions can't be reversed
-
----
-
-## 📈 Scalability
-
-- **Built on Bitcoin** - Global, decentralized, 24/7
-- **No Infrastructure Costs** - No servers/databases
-- **Works with Existing Wallets** - Universal compatibility
-- **Programmable Features** - Expiration, transfers, partial use
-- **Low Transaction Costs** - ~$0.10 per transaction
-- **Global Reach** - No borders, instant transactions
-
----
-
-## 🚀 Getting Started
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- Rust (latest stable version)
-- Node.js 18+ and npm
-- Bitcoin wallet (Unisat, Xverse, etc.)
-- Basic understanding of Bitcoin and NFTs
+- **Node.js** 18+ and npm
+- **Rust** and Cargo (for Charms CLI)
+- **Bitcoin Testnet4 Wallet** (Unisat, Xverse, or Leather)
 
 ### Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/charmygifts.git
-cd charmygifts
+# 1. Install frontend dependencies (root directory)
+npm install
 
-# Install Charms CLI
+# 2. Install API dependencies
+cd api
+npm install
+cd ..
+
+# 3. Install Charms CLI (one-time setup)
 export CARGO_TARGET_DIR=$(mktemp -d)/target
 cargo install --locked charms
 
-# Set up Charms app
-cd charms-app
-charms app new gift-cards
-charms app vk  # Save this verification key
-
-# Set up frontend
-cd ../frontend
-npm install
-npm run dev
+# 4. Build Charms app (one-time, creates WASM binary)
+cd gift-cards
+charms app build
+cd ..
 ```
 
-### Usage
+### Environment Setup
 
-1. **Create Gift Card (Merchant)**
-   - Go to merchant dashboard
-   - Fill form: Brand, Amount, Expiration
-   - Click "Create Gift Card"
-   - NFT + tokens created on Bitcoin
+**Create `api/.env`:**
+```env
+PORT=3001
+CHARMS_APP_PATH=../gift-cards
+CHARMS_APP_VK=1d7adfd77c17fec0df6ce3262d26a83318234c7d4e8a60659d331b395f67d6f0
+BITCOIN_NETWORK=testnet4
+PROVER_API_URL=https://v8.charms.dev/spells/prove
+```
 
-2. **Buy Gift Card (User)**
-   - Browse available gift cards
-   - Select gift card and pay with Bitcoin
-   - Gift card lands in wallet
+**Create `.env.local` (root directory):**
+```env
+NEXT_PUBLIC_API_URL=http://localhost:3001
+NEXT_PUBLIC_BITCOIN_NETWORK=testnet4
+NEXT_PUBLIC_CHARMS_EXPLORER_URL=https://mempool.space/testnet4
+NEXT_PUBLIC_PROVER_API_URL=https://v8.charms.dev/spells/prove
+```
 
-3. **Redeem Gift Card (User)**
-   - Open wallet and select gift card
-   - Enter amount to redeem
-   - Confirm transaction
-   - Balance updates automatically
+### Running the Application
+
+**⚠️ IMPORTANT: You need TWO terminals open!**
+
+**Terminal 1 - API Server:**
+```bash
+cd api
+npm run dev
+# Server runs on http://localhost:3001
+# Keep this terminal open!
+```
+
+**Terminal 2 - Frontend (NEW terminal, root directory):**
+```bash
+# Make sure you're in the root directory (not in api/)
+npm run dev
+# App runs on http://localhost:3000
+# Keep this terminal open!
+```
+
+**Open Browser:** http://localhost:3000
+
+---
+
+## 📁 Project Structure
+
+```
+CharmCards/
+├── gift-cards/              # Charms App (Rust) - Built once, not run
+│   ├── src/lib.rs          # zk-app logic (programmable rules)
+│   └── spells/             # Spell templates (YAML files)
+│   └── target/             # Built WASM binary (created after build)
+│
+├── api/                     # API Server (Express) - MUST RUN
+│   ├── src/
+│   │   ├── services/       # Charms service (uses gift-cards/)
+│   │   └── routes/         # API endpoints
+│   ├── package.json        # API dependencies
+│   └── .env                # API environment variables
+│
+├── src/                     # Frontend (Next.js) - MUST RUN
+│   ├── components/         # React components
+│   ├── hooks/              # React hooks (use-charms.ts)
+│   ├── lib/charms/         # Charms utilities
+│   └── app/               # Next.js pages
+│
+├── README.md               # This file (quick start)
+└── APP_OVERVIEW.md         # Complete technical documentation
+```
+
+---
+
+## 🎮 How to Use
+
+### 1. Get Testnet4 BTC
+
+1. Connect your Bitcoin wallet (Unisat, Xverse, or Leather)
+2. Switch to Testnet4 network (app will prompt you automatically)
+3. Click "Get Testnet4 BTC from Faucet" in the network modal
+4. Copy your address and use it in a Testnet4 faucet
+
+### 2. Mint a Gift Card
+
+1. Navigate to any gift card (e.g., Amazon, Uber)
+2. Select an amount
+3. Click **"Mint with Charms"**
+4. Check browser console (F12) for spell and proof
+5. Sign and broadcast transactions (when wallet API available)
+
+### 3. View Your Gift Cards
+
+- Go to "My Wallet" page
+- View all your gift cards
+- See balances and expiration dates
+
+---
+
+## 🔧 Features
+
+### Implemented
+
+- ✅ **Gift Card Minting**: Create programmable gift cards as NFTs
+- ✅ **Network Detection**: Automatic Testnet4 detection and switching
+- ✅ **Faucet Integration**: Easy access to Testnet4 BTC
+- ✅ **Wallet Connection**: Support for Unisat, Xverse, Leather
+- ✅ **Spell Creation**: Generate Charms spells for operations
+- ✅ **Proof Generation**: Generate zero-knowledge proofs via Prover API
+- ✅ **Transaction Signing**: Infrastructure for signing transactions
+- ✅ **Transaction Broadcasting**: Broadcast to Bitcoin Testnet4
+
+### Ready for Expansion
+
+- ⏳ Transfer gift cards
+- ⏳ Redeem gift card balance
+- ⏳ View gift cards in wallet
+- ⏳ Gift card marketplace
+
+See `APP_OVERVIEW.md` for detailed feature documentation and expansion guide.
+
+---
+
+## 🛠️ Development
+
+### Building the Charms App
+
+```bash
+cd gift-cards
+charms app build
+# Output: target/wasm32-wasip1/release/gift-cards.wasm
+```
+
+### Getting Verification Key
+
+```bash
+cd gift-cards
+charms app vk
+# Returns: 1d7adfd77c17fec0df6ce3262d26a83318234c7d4e8a60659d331b395f67d6f0
+```
+
+### API Endpoints
+
+- `GET /health` - Health check
+- `POST /api/gift-cards/mint` - Mint a gift card
+- `GET /api/gift-cards/:tokenId` - Get gift card details
+
+---
+
+## 🧪 Testing
+
+### Test on Bitcoin Testnet4
+
+1. **Get Testnet4 BTC**:
+   - Use faucet: https://bitcoinfaucet.uo1.net/
+   - Or click "Get Testnet4 BTC" in the app
+
+2. **Connect Wallet**:
+   - Install Unisat, Xverse, or Leather
+   - Switch to Testnet4 network
+   - Connect to app
+
+3. **Test Minting**:
+   - Navigate to any gift card
+   - Select amount
+   - Click "Mint with Charms"
+   - Verify on mempool.space/testnet4
 
 ---
 
 ## 📚 Documentation
 
+- **README.md** (this file) - Quick start and overview
+- **APP_OVERVIEW.md** - Complete technical documentation, architecture, features, and expansion guide
+
+---
+
+## 🔗 Resources
+
+- [Charms Protocol](https://charms.dev)
 - [Charms Documentation](https://docs.charms.dev)
-- [Charms Whitepaper](https://docs.charms.dev/Charms-whitepaper.pdf)
-- [Getting Started Guide](docs/getting-started.md)
-- [API Reference](docs/api-reference.md)
+- [Charms Wallet Integration](https://docs.charms.dev/guides/wallet-integration/)
+- [Bitcoin Testnet4 Faucet](https://bitcoinfaucet.uo1.net/)
+- [Mempool Explorer Testnet4](https://mempool.space/testnet4)
 
 ---
 
-## 🤝 Contributing
+## 🏗️ Architecture
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+### Backend (Charms App)
+- **Language**: Rust
+- **Framework**: Charms SDK
+- **Location**: `gift-cards/`
+- **Purpose**: Defines programmable logic for gift cards
+
+### API Server
+- **Language**: TypeScript/Node.js
+- **Framework**: Express
+- **Location**: `api/`
+- **Purpose**: Interfaces between frontend and Charms CLI/Prover API
+
+### Frontend
+- **Framework**: Next.js 15
+- **Language**: TypeScript/React
+- **Location**: `src/`
+- **Purpose**: User interface and wallet integration
 
 ---
 
-## 📄 License
+## 🎯 Programmable Features
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+### Gift Card Rules
+
+- ✅ **Expiration**: Gift cards can have expiration dates
+- ✅ **Balance Tracking**: Fungible tokens track remaining balance
+- ✅ **Partial Redemption**: Redeem portion of gift card balance
+- ✅ **Transfer Support**: Transfer gift card tokens
+- ✅ **Metadata**: NFT stores brand, image, creation date
+
+### Enforced Logic
+
+```rust
+// Expiration check
+check!(current_time < expiration_date);
+
+// Balance enforcement
+check!(output_amount < input_amount);
+
+// Transfer validation
+check!(input_amount == output_amount);
+```
+
+---
+
+## 🐛 Troubleshooting
+
+### API Server Not Starting
+- Check if port 3001 is available
+- Verify `api/.env` file exists
+- Run `cd api && npm install`
+
+### Frontend Not Loading
+- Check if port 3000 is available
+- Verify `.env.local` file exists
+- Run `npm install` in root directory
+- Clear cache: `rm -rf .next && npm run dev`
+
+### Wallet Connection Issues
+- Ensure wallet is on Testnet4 network
+- Check browser console for errors
+- Try disconnecting and reconnecting wallet
+
+### Charms CLI Issues
+- Verify Rust and Cargo are installed
+- Check `charms --version`
+- Reinstall: `cargo install --locked charms`
+
+---
+
+## 📝 License
+
+MIT License - see LICENSE file for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
-- Built with [Charms Protocol](https://charms.dev)
-- Powered by Bitcoin
-- Inspired by the need for better gift card solutions
+- Charms Protocol team for the amazing SDK
+- Bitcoin community for Testnet4
+- All open-source contributors
 
 ---
 
-## 📞 Contact
-
-- **Website**: [Your Website]
-- **Twitter**: [@YourTwitter]
-- **Discord**: [Your Discord]
-- **Email**: [Your Email]
-
----
-
-## ⭐ Why This Matters
-
-Traditional gift cards are broken. They use email codes that can be lost, stolen, or copied. They're not transferable, have no programmable features, and require trust in centralized platforms.
-
-**CharmyGifts** fixes all of this by:
-- Using NFTs instead of codes (secure, can't be lost)
-- Landing directly in wallets (instant ownership)
-- Enabling programmable features (expiration, partial redemption)
-- Leveraging Bitcoin's security (most trusted blockchain)
-- Working globally (no borders, no restrictions)
-
-**This is the future of gift cards: secure, transferable, programmable, and decentralized.**
-
----
-
-**Built with ❤️ using Charms Protocol**
-
+**Built with ❤️ for the Charms Hackathon**
