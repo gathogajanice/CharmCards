@@ -2,13 +2,17 @@
 
 import React, { useState } from 'react';
 import Image from 'next/image';
-import { ShoppingCart, Bitcoin, Loader } from 'lucide-react';
+import { Bitcoin, Loader } from 'lucide-react';
 import { useCharms } from '@/hooks/use-charms';
 import { useAppKitAccount, useAppKit } from '@reown/appkit/react';
 import { toast } from 'sonner';
-import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions } from '@/lib/charms/wallet';
+import { useRouter } from 'next/navigation';
+import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions, getWalletBalance } from '@/lib/charms/wallet';
 import { useNetworkCheck } from '@/hooks/use-network-check';
 import NetworkSwitchModal from '@/components/ui/network-switch-modal';
+import { calculateTotalCostSats, hasSufficientBalance, formatSats, satsToBtc } from '@/lib/charms/fees';
+import { useEffect } from 'react';
+import TransactionStatus, { TransactionStatus as TxStatus } from '@/components/ui/transaction-status';
 
 interface GiftCardPurchaseProps {
   name: string;
@@ -24,10 +28,17 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
   const [quantity, setQuantity] = useState(1);
   const [imageError, setImageError] = useState(false);
   const [isMinting, setIsMinting] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
+  const [balanceCheckError, setBalanceCheckError] = useState<string | null>(null);
+  const [txStatus, setTxStatus] = useState<TxStatus>('idle');
+  const [commitTxid, setCommitTxid] = useState<string | undefined>();
+  const [spellTxid, setSpellTxid] = useState<string | undefined>();
+  const [txError, setTxError] = useState<string | undefined>();
   
   const { address, isConnected } = useAppKitAccount();
   const { open: openWallet } = useAppKit();
   const { mintGiftCard, isLoading: charmsLoading, error: charmsError } = useCharms();
+  const router = useRouter();
   const {
     currentNetwork,
     isOnCorrectNetwork,
@@ -35,6 +46,27 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
     showNetworkModal,
     setShowNetworkModal,
   } = useNetworkCheck();
+
+  // Fetch wallet balance when connected
+  useEffect(() => {
+    const fetchBalance = async () => {
+      if (!address || !isConnected) {
+        setWalletBalance(null);
+        return;
+      }
+
+      try {
+        const balance = await getWalletBalance(address, null);
+        setWalletBalance(balance);
+        setBalanceCheckError(null);
+      } catch (error: any) {
+        console.warn('Failed to fetch wallet balance:', error);
+        setBalanceCheckError('Unable to check balance');
+      }
+    };
+
+    fetchBalance();
+  }, [address, isConnected]);
 
   const handleCustomAmount = (value: string) => {
     setCustomAmount(value);
@@ -49,6 +81,13 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
   const currentAmount = selectedAmount || (customAmount ? parseFloat(customAmount) : 0);
   const discountedPrice = discount ? currentAmount * (1 - parseFloat(discount) / 100) : currentAmount;
   const total = discountedPrice * quantity;
+
+  // Calculate fees and check balance
+  const giftCardAmountCents = Math.floor(total * 100);
+  const costBreakdown = currentAmount > 0 ? calculateTotalCostSats(giftCardAmountCents) : null;
+  const balanceCheck = walletBalance !== null && costBreakdown 
+    ? hasSufficientBalance(walletBalance, giftCardAmountCents)
+    : null;
 
   const handleMintGiftCard = async () => {
     if (!isConnected || !address) {
@@ -73,7 +112,25 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       return;
     }
 
+    // Check wallet balance before proceeding
+    if (walletBalance !== null && costBreakdown) {
+      const balanceCheck = hasSufficientBalance(walletBalance, giftCardAmountCents);
+      if (!balanceCheck.sufficient) {
+        toast.error(
+          `Insufficient balance. Required: ${formatSats(balanceCheck.requiredSats)}, ` +
+          `Available: ${formatSats(balanceCheck.availableSats)}. ` +
+          `Shortfall: ${formatSats(balanceCheck.shortfallSats)}`
+        );
+        return;
+      }
+    }
+
     setIsMinting(true);
+    setTxStatus('creating-spell');
+    setTxError(undefined);
+    setCommitTxid(undefined);
+    setSpellTxid(undefined);
+    
     try {
       // Get UTXO from wallet
       let inUtxo: string;
@@ -81,17 +138,24 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         // Fetch UTXOs from mempool.space API (works with any Bitcoin address)
         const utxos = await getWalletUtxos(address, null);
         if (utxos.length === 0) {
+          setTxStatus('error');
+          setTxError('No UTXOs available. Please fund your wallet with Testnet4 BTC.');
           toast.error('No UTXOs available. Please fund your wallet with Testnet4 BTC.');
+          setIsMinting(false);
           return;
         }
         // Use first available UTXO
         inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
       } else {
+        setTxStatus('error');
+        setTxError('Wallet not connected');
         toast.error('Wallet not connected');
+        setIsMinting(false);
         return;
       }
       
       // Create spell and generate proof
+      setTxStatus('generating-proof');
       const { spell, proof } = await mintGiftCard({
         inUtxo,
         recipientAddress: address,
@@ -120,6 +184,7 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             address: address,
           };
           
+          setTxStatus('signing');
           toast.info('Attempting to sign transactions...');
           
           // Try to sign transactions using the signSpellTransactions function
@@ -138,11 +203,16 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             const wasSigned = signedCommitTx !== proof.commit_tx || signedSpellTx !== proof.spell_tx;
             
             if (wasSigned || signedCommitTx || signedSpellTx) {
+              setTxStatus('broadcasting');
               toast.info('Broadcasting transactions...');
               const { commitTxid, spellTxid } = await broadcastSpellTransactions(
                 signedCommitTx,
                 signedSpellTx
               );
+              
+              setCommitTxid(commitTxid);
+              setSpellTxid(spellTxid);
+              setTxStatus('confirming');
               
               toast.success(`✅ Gift card minted successfully!`);
               toast.success(`Commit TX: ${commitTxid.substring(0, 16)}...`);
@@ -156,10 +226,41 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
               
               // Store transaction IDs for reference
               (window as any).lastMintTxids = { commitTxid, spellTxid };
+              
+              // Store in localStorage for transaction history
+              try {
+                const txHistory = JSON.parse(localStorage.getItem('charmCardsTxHistory') || '[]');
+                txHistory.push({
+                  type: 'mint',
+                  brand: name,
+                  image: imageUrl, // Store image URL for wallet display
+                  commitTxid,
+                  spellTxid,
+                  timestamp: Date.now(),
+                  amount: currentAmount,
+                });
+                localStorage.setItem('charmCardsTxHistory', JSON.stringify(txHistory));
+              } catch (e) {
+                console.warn('Failed to save transaction history:', e);
+              }
+              
+              // Mark as success after a short delay
+              setTimeout(() => {
+                setTxStatus('success');
+                // Trigger refresh and redirect to collection page after 3 seconds
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('refreshWalletData'));
+                  setTimeout(() => {
+                    router.push('/wallet');
+                  }, 3000);
+                }
+              }, 2000);
             } else {
               throw new Error('Transactions were not signed');
             }
           } catch (signError: any) {
+            setTxStatus('error');
+            setTxError(signError.message || 'Signing failed');
             // If signing failed, provide manual instructions
             console.log('\n⚠️ Automatic signing not available. Manual signing required.');
             console.log('Commit TX (hex):', proof.commit_tx);
@@ -180,6 +281,8 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             toast.info('See console for transaction hex and signing instructions.');
           }
         } catch (signError: any) {
+          setTxStatus('error');
+          setTxError(signError.message || 'Transaction error');
           console.error('Signing/broadcasting error:', signError);
           toast.error(`Transaction error: ${signError.message}`);
           console.log('\n=== ERROR DETAILS ===');
@@ -188,12 +291,16 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           console.log('Error:', signError);
         }
       } else {
+        setTxStatus('error');
+        setTxError('Transactions not included in proof');
         toast.success('Spell created! Proof generated.');
         console.log('Spell:', spell);
         console.log('Proof:', proof);
         toast.warning('Transactions not included in proof. Check API response.');
       }
     } catch (error: any) {
+      setTxStatus('error');
+      setTxError(error.message || 'Failed to create gift card');
       toast.error(error.message || 'Failed to create gift card');
       console.error('Minting error:', error);
     } finally {
@@ -293,35 +400,72 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
               </div>
             </div>
 
-            {/* Price display removed - testing on-chain only */}
+            {/* Transaction Status */}
+            {txStatus !== 'idle' && (
+              <div className="mb-6">
+                <TransactionStatus
+                  status={txStatus}
+                  commitTxid={commitTxid}
+                  spellTxid={spellTxid}
+                  error={txError}
+                />
+              </div>
+            )}
 
-            <div className="flex gap-3">
-              <button className="flex-1 h-12 bg-primary text-primary-foreground font-semibold rounded-full flex items-center justify-center gap-2 hover:opacity-90 transition-opacity">
-                <ShoppingCart size={18} />
-                Add to Cart
-              </button>
-              <button
-                onClick={handleMintGiftCard}
-                disabled={isMinting || charmsLoading || !isConnected}
-                className="flex-1 h-12 bg-foreground text-background font-semibold rounded-full flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isMinting || charmsLoading ? (
-                  <>
-                    <Loader size={18} className="animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <Bitcoin size={18} />
-                    Mint with Charms
-                  </>
-                )}
-              </button>
-            </div>
+            {/* Fee Breakdown */}
+            {isConnected && currentAmount > 0 && costBreakdown && (
+              <div className="mb-6 p-4 bg-background border border-border rounded-[12px]">
+                <h3 className="text-[14px] font-semibold text-foreground mb-3">Cost Breakdown</h3>
+                <div className="space-y-2 text-[13px]">
+                  <div className="flex justify-between text-foreground/80">
+                    <span>Gift Card Amount:</span>
+                    <span className="font-medium">${total.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-foreground/80">
+                    <span>Estimated Network Fees:</span>
+                    <span className="font-medium">{formatSats(costBreakdown.estimatedFeesSats)}</span>
+                  </div>
+                  <div className="pt-2 border-t border-border flex justify-between text-foreground font-semibold">
+                    <span>Total Required:</span>
+                    <span>{formatSats(costBreakdown.minimumRequiredSats)}</span>
+                  </div>
+                  {walletBalance !== null && balanceCheck && (
+                    <div className={`pt-2 text-[12px] ${balanceCheck.sufficient ? 'text-green-600' : 'text-red-600'}`}>
+                      {balanceCheck.sufficient ? (
+                        <span>✓ Sufficient balance ({formatSats(balanceCheck.availableSats)} available)</span>
+                      ) : (
+                        <span>
+                          ✗ Insufficient balance. Need {formatSats(balanceCheck.shortfallSats)} more.
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {balanceCheckError && (
+                    <div className="pt-2 text-[12px] text-foreground/60">
+                      {balanceCheckError}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
-            <p className="text-center text-muted-foreground text-[13px] mt-4">
-              Pay with 100+ cryptocurrencies
-            </p>
+            <button
+              onClick={handleMintGiftCard}
+              disabled={isMinting || charmsLoading || !isConnected}
+              className="w-full h-12 bg-foreground text-background font-semibold rounded-full flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isMinting || charmsLoading ? (
+                <>
+                  <Loader size={18} className="animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                <>
+                  <Bitcoin size={18} />
+                  Mint with Charms
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>

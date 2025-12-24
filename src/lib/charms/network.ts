@@ -100,7 +100,77 @@ export function getNetworkSwitchInstructions(walletName?: string): {
 }
 
 /**
- * Attempt to detect wallet name from window object
+ * Detect which wallet is actually connected (has accounts)
+ * This checks which wallet has active accounts, not just which is installed
+ */
+export async function detectConnectedWallet(): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+  
+  // Check Unisat - see if it has accounts
+  if ((window as any).unisat) {
+    try {
+      const accounts = await (window as any).unisat.getAccounts();
+      if (accounts && accounts.length > 0) {
+        return 'unisat';
+      }
+    } catch (e) {
+      // Not connected via Unisat
+    }
+  }
+  
+  // Check Xverse - see if it has accounts
+  if ((window as any).XverseProviders) {
+    try {
+      const xverse = (window as any).XverseProviders?.BitcoinProvider;
+      if (xverse) {
+        // Try to get accounts
+        if (typeof xverse.getAccounts === 'function') {
+          const accounts = await xverse.getAccounts();
+          if (accounts && accounts.length > 0) {
+            return 'xverse';
+          }
+        } else if (typeof xverse.request === 'function') {
+          const response = await xverse.request('getAccounts', {});
+          const accounts = Array.isArray(response) ? response : (response?.accounts || []);
+          if (accounts && accounts.length > 0) {
+            return 'xverse';
+          }
+        }
+      }
+    } catch (e) {
+      // Not connected via Xverse
+    }
+  }
+  
+  // Check Leather - see if it has accounts
+  if ((window as any).btc) {
+    try {
+      const leather = (window as any).btc;
+      if (leather) {
+        if (typeof leather.getAccounts === 'function') {
+          const accounts = await leather.getAccounts();
+          if (accounts && accounts.length > 0) {
+            return 'leather';
+          }
+        } else if (typeof leather.request === 'function') {
+          const response = await leather.request('getAccounts', {});
+          const accounts = Array.isArray(response) ? response : (response?.accounts || []);
+          if (accounts && accounts.length > 0) {
+            return 'leather';
+          }
+        }
+      }
+    } catch (e) {
+      // Not connected via Leather
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Attempt to detect wallet name from window object (installed wallets)
+ * This is a fallback that just checks if wallets are installed
  */
 export function detectWalletName(): string | null {
   if (typeof window === 'undefined') return null;
@@ -116,7 +186,7 @@ export function detectWalletName(): string | null {
   }
   
   // Check for Leather (Hiro)
-  if ((window as any).hiroWalletProvider) {
+  if ((window as any).btc || (window as any).hiroWalletProvider) {
     return 'leather';
   }
   
@@ -203,6 +273,101 @@ export async function getNetworkFromWallet(walletName?: string): Promise<'mainne
 }
 
 /**
+ * Connect and switch network automatically for a wallet
+ * First connects if not connected, then switches network
+ */
+export async function connectAndSwitchNetwork(walletName?: string): Promise<{ connected: boolean; switched: boolean; wallet: string | null }> {
+  if (typeof window === 'undefined') return { connected: false, switched: false, wallet: null };
+  
+  const detectedWallet = walletName || (await detectConnectedWallet()) || detectWalletName();
+  
+  if (!detectedWallet) {
+    return { connected: false, switched: false, wallet: null };
+  }
+  
+  try {
+    // First, ensure wallet is connected - this will trigger the popup
+    let isConnected = false;
+    
+    if (detectedWallet === 'unisat' && (window as any).unisat) {
+      try {
+        const unisat = (window as any).unisat;
+        // Check if already connected
+        const existingAccounts = await unisat.getAccounts();
+        if (existingAccounts && existingAccounts.length > 0) {
+          isConnected = true;
+        } else {
+          // Connect - this will trigger Unisat popup
+          console.log('Requesting Unisat connection...');
+          const newAccounts = await unisat.requestAccounts();
+          if (newAccounts && newAccounts.length > 0) {
+            isConnected = true;
+            console.log('Unisat connected:', newAccounts[0]);
+          }
+        }
+      } catch (e: any) {
+        console.log('Unisat connection failed:', e);
+        // If user rejected, that's okay - popup was shown
+        if (e?.code === 4001) {
+          return { connected: false, switched: false, wallet: detectedWallet };
+        }
+      }
+    } else if (detectedWallet === 'xverse' && (window as any).XverseProviders) {
+      try {
+        // Use the direct connection function which properly triggers Xverse popup
+        const { connectXverseDirectly } = await import('@/lib/charms/wallet-connection');
+        console.log('Requesting Xverse connection - popup should appear...');
+        
+        const address = await connectXverseDirectly();
+        if (address) {
+          isConnected = true;
+          console.log('Xverse connected:', address);
+        } else {
+          throw new Error('Xverse connection returned no address');
+        }
+      } catch (e: any) {
+        console.log('Xverse connection failed:', e);
+        // If user rejected, that's okay - popup was shown
+        if (e?.code === 4001 || e?.message?.includes('reject') || e?.message?.includes('denied') || e?.message?.includes('User rejected')) {
+          return { connected: false, switched: false, wallet: detectedWallet };
+        }
+        // Re-throw other errors
+        throw e;
+      }
+    } else if (detectedWallet === 'leather' && (window as any).btc) {
+      try {
+        // Use the direct connection function which properly triggers Leather popup
+        const { connectLeatherDirectly } = await import('@/lib/charms/wallet-connection');
+        console.log('Requesting Leather connection - popup should appear...');
+        
+        const address = await connectLeatherDirectly();
+        if (address) {
+          isConnected = true;
+          console.log('Leather connected:', address);
+        } else {
+          throw new Error('Leather connection returned no address');
+        }
+      } catch (e: any) {
+        console.log('Leather connection failed:', e);
+        if (e?.code === 4001 || e?.message?.includes('reject') || e?.message?.includes('denied') || e?.message?.includes('User rejected')) {
+          return { connected: false, switched: false, wallet: detectedWallet };
+        }
+        throw e;
+      }
+    }
+    
+    // Now attempt network switch - this may also trigger a popup
+    console.log(`Attempting to switch ${detectedWallet} to Testnet4...`);
+    const switched = await attemptNetworkSwitch(detectedWallet);
+    
+    return { connected: isConnected, switched, wallet: detectedWallet };
+  } catch (error) {
+    console.error('Connect and switch failed:', error);
+    return { connected: false, switched: false, wallet: detectedWallet };
+  }
+}
+
+/**
  * Attempt to switch network programmatically (if wallet supports it)
  * This will trigger the wallet's network switcher UI
  */
@@ -211,84 +376,52 @@ export async function attemptNetworkSwitch(walletName?: string): Promise<boolean
   
   const detectedWallet = walletName || detectWalletName();
   
+  if (!detectedWallet) {
+    console.warn('No wallet detected for network switch');
+    return false;
+  }
+  
   try {
     // Unisat network switching
     if (detectedWallet === 'unisat' && (window as any).unisat) {
       try {
         const unisat = (window as any).unisat;
         
-        console.log('Unisat API available:', {
-          switchNetwork: typeof unisat.switchNetwork,
-          request: typeof unisat.request,
-          requestAccounts: typeof unisat.requestAccounts,
-          getNetwork: typeof unisat.getNetwork,
-        });
+        console.log('Attempting Unisat network switch...');
         
-        // Method 1: Try switchNetwork with different network names
+        // Method 1: Try switchNetwork (most common)
         if (typeof unisat.switchNetwork === 'function') {
           try {
-            // Try 'testnet4' first
-            await unisat.switchNetwork('testnet4');
-            console.log('Switched to testnet4');
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Unisat uses 'testnet' for Testnet4
+            const result = await unisat.switchNetwork('testnet');
+            console.log('Unisat switchNetwork result:', result);
+            // Wait for network to actually switch
+            await new Promise(resolve => setTimeout(resolve, 1500));
             return true;
           } catch (error: any) {
-            console.log('testnet4 failed, trying testnet:', error);
-            // Try 'testnet' as alternative name
-            try {
-              await unisat.switchNetwork('testnet');
-              console.log('Switched to testnet');
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              return true;
-            } catch (e: any) {
-              console.log('testnet also failed:', e);
-              // If user rejects, that's okay - wallet UI was shown
-              if (e?.message?.includes('user') || e?.message?.includes('reject') || e?.code === 4001) {
-                return false; // User cancelled, but UI was shown
-              }
+            console.log('switchNetwork failed:', error);
+            // If user rejected, return false
+            if (error?.code === 4001 || error?.message?.includes('reject') || error?.message?.includes('user')) {
+              return false;
             }
           }
         }
         
-        // Method 2: Try request method with different formats
+        // Method 2: Try request method
         if (typeof unisat.request === 'function') {
-          const methods = [
-            { method: 'switchNetwork', params: { network: 'testnet4' } },
-            { method: 'switchNetwork', params: { network: 'testnet' } },
-            { method: 'wallet_switchNetwork', params: { network: 'testnet4' } },
-            { method: 'wallet_switchNetwork', params: { network: 'testnet' } },
-          ];
-          
-          for (const requestParams of methods) {
-            try {
-              await unisat.request(requestParams);
-              console.log('Network switched via request:', requestParams);
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              return true;
-            } catch (error: any) {
-              console.log('Request method failed:', requestParams, error);
-              if (error?.code === 4001) {
-                return false; // User cancelled
-              }
-              // Continue to next method
+          try {
+            await unisat.request({ method: 'switchNetwork', params: { network: 'testnet' } });
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            return true;
+          } catch (error: any) {
+            console.log('request method failed:', error);
+            if (error?.code === 4001) {
+              return false;
             }
           }
         }
         
-        // Method 3: Check if there's a getNetwork method and try to set it
-        if (typeof unisat.getNetwork === 'function') {
-          try {
-            const currentNetwork = await unisat.getNetwork();
-            console.log('Current Unisat network:', currentNetwork);
-            // If we can get network, maybe we can set it differently
-          } catch (error) {
-            console.log('getNetwork failed:', error);
-          }
-        }
-        
-        // Method 4: Try to trigger network selector by disconnecting/reconnecting
-        // This is a fallback - might show network selector
-        console.log('All automatic methods failed, user needs to switch manually');
+        console.log('Unisat network switch methods failed');
         return false;
       } catch (error: any) {
         console.error('Failed to switch Unisat network:', error);
@@ -296,64 +429,119 @@ export async function attemptNetworkSwitch(walletName?: string): Promise<boolean
       }
     }
     
-    // Xverse network switching - uses wallet_changeNetwork method
+    // Xverse network switching
     if (detectedWallet === 'xverse' && (window as any).XverseProviders) {
       try {
         const xverse = (window as any).XverseProviders?.BitcoinProvider;
-        if (xverse && typeof xverse.request === 'function') {
+        if (!xverse) {
+          console.warn('Xverse provider not found');
+          return false;
+        }
+        
+        console.log('Attempting Xverse network switch...');
+        
+        // Try multiple methods
+        if (typeof xverse.request === 'function') {
           try {
-            // Xverse uses wallet_changeNetwork method
+            // Try wallet_changeNetwork
             await xverse.request({
               method: 'wallet_changeNetwork',
               params: { network: 'testnet4' }
             });
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 1500));
             return true;
           } catch (error: any) {
+            console.log('wallet_changeNetwork failed:', error);
             if (error?.code === 4001) {
-              return false; // User cancelled
+              return false;
             }
-            // Try alternative method
-            if (typeof xverse.switchNetwork === 'function') {
-              await xverse.switchNetwork('testnet4');
-              await new Promise(resolve => setTimeout(resolve, 2000));
+            // Try switchNetwork
+            try {
+              await xverse.request({
+                method: 'switchNetwork',
+                params: { network: 'testnet4' }
+              });
+              await new Promise(resolve => setTimeout(resolve, 1500));
               return true;
+            } catch (e: any) {
+              console.log('switchNetwork failed:', e);
+              if (e?.code === 4001) {
+                return false;
+              }
             }
           }
         }
+        
+        // Try direct method if available
+        if (typeof xverse.switchNetwork === 'function') {
+          try {
+            await xverse.switchNetwork('testnet4');
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            return true;
+          } catch (error: any) {
+            console.log('Direct switchNetwork failed:', error);
+            if (error?.code === 4001) {
+              return false;
+            }
+          }
+        }
+        
+        console.log('Xverse network switch methods failed');
+        return false;
       } catch (error) {
         console.warn('Failed to switch Xverse network:', error);
+        return false;
       }
-      return false;
     }
     
     // Leather network switching
     if (detectedWallet === 'leather' && (window as any).btc) {
       try {
         const leather = (window as any).btc;
-        if (leather && typeof leather.request === 'function') {
+        if (!leather) {
+          console.warn('Leather provider not found');
+          return false;
+        }
+        
+        console.log('Attempting Leather network switch...');
+        
+        // Try request method first
+        if (typeof leather.request === 'function') {
           try {
             await leather.request({
               method: 'switchNetwork',
               params: { network: 'testnet4' }
             });
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 1500));
             return true;
           } catch (error: any) {
+            console.log('request switchNetwork failed:', error);
             if (error?.code === 4001) {
-              return false; // User cancelled
+              return false;
             }
           }
         }
-        if (leather && typeof leather.switchNetwork === 'function') {
-          await leather.switchNetwork('testnet4');
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          return true;
+        
+        // Try direct method
+        if (typeof leather.switchNetwork === 'function') {
+          try {
+            await leather.switchNetwork('testnet4');
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            return true;
+          } catch (error: any) {
+            console.log('Direct switchNetwork failed:', error);
+            if (error?.code === 4001) {
+              return false;
+            }
+          }
         }
+        
+        console.log('Leather network switch methods failed');
+        return false;
       } catch (error) {
         console.warn('Failed to switch Leather network:', error);
+        return false;
       }
-      return false;
     }
   } catch (error) {
     console.warn('Network switch attempt failed:', error);
@@ -362,4 +550,6 @@ export async function attemptNetworkSwitch(walletName?: string): Promise<boolean
   
   return false;
 }
+
+
 

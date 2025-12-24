@@ -21,6 +21,7 @@ export function useNetworkCheck() {
   const [currentNetwork, setCurrentNetwork] = useState<string>('unknown');
   const [isChecking, setIsChecking] = useState(false);
   const [hasChecked, setHasChecked] = useState(false);
+  const [dismissedUntil, setDismissedUntil] = useState<number | null>(null);
 
   // Detect network from address and wallet
   useEffect(() => {
@@ -55,16 +56,27 @@ export function useNetworkCheck() {
         const isOnCorrectNetwork = network === REQUIRED_NETWORK || 
                                    (network === 'testnet' && REQUIRED_NETWORK === 'testnet4');
         
-        if (!isOnCorrectNetwork && network !== 'unknown') {
-          console.log('Network mismatch detected. Current:', network, 'Required:', REQUIRED_NETWORK);
-          setShowNetworkModal(true);
-          if (!hasChecked) {
-            setHasChecked(true);
-          }
-        } else if (isOnCorrectNetwork) {
+        if (isOnCorrectNetwork) {
           console.log('Network is correct:', network);
           setShowNetworkModal(false);
           setHasChecked(false); // Reset so we can check again if network changes
+          setDismissedUntil(null); // Clear dismissal when network is correct
+        } else if (!isOnCorrectNetwork && network !== 'unknown') {
+          // Check if user dismissed the modal recently (within last 5 minutes)
+          const now = Date.now();
+          const wasDismissed = dismissedUntil && now < dismissedUntil;
+          
+          if (!wasDismissed) {
+            console.log('Network mismatch detected. Current:', network, 'Required:', REQUIRED_NETWORK);
+            // Only show modal if it hasn't been dismissed recently
+            setShowNetworkModal(true);
+            if (!hasChecked) {
+              setHasChecked(true);
+            }
+          } else {
+            // Modal was dismissed, don't show it again yet
+            setShowNetworkModal(false);
+          }
         }
       } else {
         setCurrentNetwork('unknown');
@@ -75,11 +87,12 @@ export function useNetworkCheck() {
     detectNetwork();
     
     // Poll network status periodically when connected to detect changes
+    // Reduced frequency to avoid constant checks
     let pollInterval: NodeJS.Timeout | null = null;
     if (address && isConnected) {
       pollInterval = setInterval(() => {
         detectNetwork();
-      }, 3000); // Check every 3 seconds
+      }, 10000); // Check every 10 seconds (reduced from 3 seconds)
     }
     
     return () => {
@@ -116,12 +129,40 @@ export function useNetworkCheck() {
   const isOnCorrectNetwork = isOnRequiredNetwork(address || '');
   const needsSwitch = isConnected && !isOnCorrectNetwork && currentNetwork !== 'unknown';
 
+  // Function to dismiss modal for a period of time
+  const dismissModal = useCallback((minutes: number = 5) => {
+    const dismissUntil = Date.now() + (minutes * 60 * 1000);
+    setDismissedUntil(dismissUntil);
+    setShowNetworkModal(false);
+    // Store in localStorage so it persists across page reloads
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('networkModalDismissedUntil', dismissUntil.toString());
+    }
+  }, []);
+
+  // Load dismissed state from localStorage on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('networkModalDismissedUntil');
+      if (stored) {
+        const dismissedUntilTime = parseInt(stored, 10);
+        if (dismissedUntilTime > Date.now()) {
+          setDismissedUntil(dismissedUntilTime);
+        } else {
+          // Expired, clear it
+          localStorage.removeItem('networkModalDismissedUntil');
+        }
+      }
+    }
+  }, []);
+
   return {
     currentNetwork,
     isOnCorrectNetwork,
     needsSwitch,
     showNetworkModal,
     setShowNetworkModal,
+    dismissModal,
     attemptAutoSwitch,
     isChecking,
     hasChecked,
