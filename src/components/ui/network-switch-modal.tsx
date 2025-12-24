@@ -36,7 +36,6 @@ export default function NetworkSwitchModal({
   useEffect(() => {
     const detectWallet = async () => {
       if (isConnected && address) {
-        const { detectConnectedWallet } = await import('@/lib/charms/network');
         const wallet = await detectConnectedWallet();
         setConnectedWallet(wallet);
       } else {

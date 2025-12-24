@@ -5,6 +5,7 @@
 
 /**
  * Connect directly to Xverse wallet
+ * Works the same way as Unisat - triggers popup for user approval
  */
 export async function connectXverseDirectly(): Promise<string | null> {
   if (typeof window === 'undefined') {
@@ -21,37 +22,85 @@ export async function connectXverseDirectly(): Promise<string | null> {
   }
 
   try {
-    // Try different Xverse API methods
+    // First check if already connected (non-blocking)
     let accounts: string[] = [];
-    
-    // Method 1: Try getAccounts if available
-    if (typeof xverse.getAccounts === 'function') {
-      accounts = await xverse.getAccounts();
-    }
-    // Method 2: Try request with getAccounts
-    else if (typeof xverse.request === 'function') {
-      const response = await xverse.request('getAccounts', {});
-      accounts = Array.isArray(response) ? response : (response?.accounts || []);
-    }
-    // Method 3: Try requestAccounts (similar to Unisat)
-    else if (typeof xverse.requestAccounts === 'function') {
-      accounts = await xverse.requestAccounts();
-    }
-    else {
-      throw new Error('Xverse API not available. Please ensure Xverse extension is installed and enabled.');
+    try {
+      if (typeof xverse.getAccounts === 'function') {
+        accounts = await xverse.getAccounts();
+      }
+    } catch (e) {
+      // Not connected yet, will request below
     }
     
+    // If already connected, return address
     if (accounts && accounts.length > 0) {
-      const address = accounts[0];
-      console.log('Xverse connected directly:', address);
-      return address;
+      console.log('Xverse already connected:', accounts[0]);
+      return accounts[0];
     }
     
-    throw new Error('No accounts found in Xverse wallet.');
+    // Request connection - this triggers Xverse popup (same as Unisat requestAccounts)
+    console.log('Requesting Xverse connection - popup should appear...');
+    
+    // Method 1: Try request with getAccounts (most common - triggers popup)
+    if (typeof xverse.request === 'function') {
+      try {
+        const response = await xverse.request('getAccounts', {});
+        accounts = Array.isArray(response) ? response : (response?.accounts || []);
+        if (accounts && accounts.length > 0) {
+          console.log('Xverse connected via request:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (reqError: any) {
+        // If request fails, try other methods
+        console.log('Xverse request method:', reqError);
+        if (reqError?.code === 4001) {
+          throw new Error('Connection rejected. Please approve the connection request in Xverse.');
+        }
+      }
+    }
+    
+    // Method 2: Try getAccounts directly (might also trigger popup)
+    if (accounts.length === 0 && typeof xverse.getAccounts === 'function') {
+      try {
+        accounts = await xverse.getAccounts();
+        if (accounts && accounts.length > 0) {
+          console.log('Xverse connected via getAccounts:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (getError: any) {
+        console.log('Xverse getAccounts method:', getError);
+        if (getError?.code === 4001) {
+          throw new Error('Connection rejected. Please approve the connection request in Xverse.');
+        }
+      }
+    }
+    
+    // Method 3: Try requestAccounts (similar to Unisat)
+    if (accounts.length === 0 && typeof xverse.requestAccounts === 'function') {
+      try {
+        accounts = await xverse.requestAccounts();
+        if (accounts && accounts.length > 0) {
+          console.log('Xverse connected via requestAccounts:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (reqAccError: any) {
+        console.log('Xverse requestAccounts method:', reqAccError);
+        if (reqAccError?.code === 4001) {
+          throw new Error('Connection rejected. Please approve the connection request in Xverse.');
+        }
+      }
+    }
+    
+    if (accounts.length === 0) {
+      throw new Error('No accounts found in Xverse wallet. Please ensure Xverse is unlocked.');
+    }
+    
+    return accounts[0];
   } catch (error: any) {
     console.error('Failed to connect to Xverse:', error);
     
-    if (error.code === 4001 || error.message?.includes('rejected') || error.message?.includes('denied')) {
+    // Provide helpful error messages (same format as Unisat)
+    if (error.code === 4001 || error.message?.includes('rejected') || error.message?.includes('denied') || error.message?.includes('User rejected')) {
       throw new Error('Connection rejected. Please approve the connection request in Xverse.');
     }
     
@@ -65,37 +114,106 @@ export async function connectXverseDirectly(): Promise<string | null> {
 
 /**
  * Connect directly to Leather wallet
+ * Works the same way as Unisat - triggers popup for user approval
  */
 export async function connectLeatherDirectly(): Promise<string | null> {
   if (typeof window === 'undefined') {
     return null;
   }
 
-  const leather = (window as any).btc;
+  const leather = (window as any).btc || (window as any).hiroWalletProvider;
   
   if (!leather) {
     throw new Error('Leather wallet not detected. Please install the Leather extension.');
   }
 
   try {
-    // Request account access
-    const response = await leather.request('getAccounts', {});
-    
-    if (response && response.length > 0) {
-      const address = response[0];
-      console.log('Leather connected directly:', address);
-      return address;
+    // First check if already connected (non-blocking)
+    let accounts: string[] = [];
+    try {
+      if (typeof leather.getAccounts === 'function') {
+        accounts = await leather.getAccounts();
+      }
+    } catch (e) {
+      // Not connected yet, will request below
     }
     
-    return null;
+    // If already connected, return address
+    if (accounts && accounts.length > 0) {
+      console.log('Leather already connected:', accounts[0]);
+      return accounts[0];
+    }
+    
+    // Request connection - this triggers Leather popup (same as Unisat requestAccounts)
+    console.log('Requesting Leather connection - popup should appear...');
+    
+    // Method 1: Try request with getAccounts (triggers popup)
+    if (typeof leather.request === 'function') {
+      try {
+        const response = await leather.request('getAccounts', {});
+        accounts = Array.isArray(response) ? response : (response?.accounts || []);
+        if (accounts && accounts.length > 0) {
+          console.log('Leather connected via request:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (reqError: any) {
+        console.log('Leather request method:', reqError);
+        if (reqError?.code === 4001) {
+          throw new Error('Connection rejected. Please approve the connection request in Leather.');
+        }
+      }
+    }
+    
+    // Method 2: Try getAccounts directly (might also trigger popup)
+    if (accounts.length === 0 && typeof leather.getAccounts === 'function') {
+      try {
+        accounts = await leather.getAccounts();
+        if (accounts && accounts.length > 0) {
+          console.log('Leather connected via getAccounts:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (getError: any) {
+        console.log('Leather getAccounts method:', getError);
+        if (getError?.code === 4001) {
+          throw new Error('Connection rejected. Please approve the connection request in Leather.');
+        }
+      }
+    }
+    
+    // Method 3: Try requestAccounts if available
+    if (accounts.length === 0 && typeof leather.requestAccounts === 'function') {
+      try {
+        accounts = await leather.requestAccounts();
+        if (accounts && accounts.length > 0) {
+          console.log('Leather connected via requestAccounts:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (reqAccError: any) {
+        console.log('Leather requestAccounts method:', reqAccError);
+        if (reqAccError?.code === 4001) {
+          throw new Error('Connection rejected. Please approve the connection request in Leather.');
+        }
+      }
+    }
+    
+    if (accounts.length === 0) {
+      throw new Error('No accounts found in Leather wallet. Please ensure Leather is unlocked.');
+    }
+    
+    return accounts[0];
   } catch (error: any) {
     console.error('Failed to connect to Leather:', error);
     
-    if (error.code === 4001) {
+    // Provide helpful error messages (same format as Unisat)
+    if (error.code === 4001 || error.message?.includes('rejected') || error.message?.includes('denied') || error.message?.includes('User rejected')) {
       throw new Error('Connection rejected. Please approve the connection request in Leather.');
     }
     
-    throw new Error(`Failed to connect: ${error.message || 'Unknown error'}`);
+    if (error.message?.includes('not installed') || error.message?.includes('not found') || error.message?.includes('not detected')) {
+      throw new Error('Leather wallet not found. Please install the Leather extension.');
+    }
+    
+    throw new Error(`Failed to connect to Leather: ${error.message || 'Unknown error'}`);
   }
 }
 

@@ -8,6 +8,8 @@ import { useAppKitAccount, useAppKit } from '@reown/appkit/react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
 import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions, getWalletBalance } from '@/lib/charms/wallet';
+
+const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
 import { useNetworkCheck } from '@/hooks/use-network-check';
 import NetworkSwitchModal from '@/components/ui/network-switch-modal';
 import { calculateTotalCostSats, hasSufficientBalance, formatSats, satsToBtc } from '@/lib/charms/fees';
@@ -132,32 +134,64 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
     setSpellTxid(undefined);
     
     try {
-      // Get UTXO from wallet
-      let inUtxo: string;
-      if (address) {
-        // Fetch UTXOs from mempool.space API (works with any Bitcoin address)
-        const utxos = await getWalletUtxos(address, null);
-        if (utxos.length === 0) {
-          setTxStatus('error');
-          setTxError('No UTXOs available. Please fund your wallet with Testnet4 BTC.');
-          toast.error('No UTXOs available. Please fund your wallet with Testnet4 BTC.');
-          setIsMinting(false);
-          return;
-        }
-        // Use first available UTXO
-        inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
-      } else {
+      // Step 1: Verify balance (more reliable than UTXO fetching)
+      const currentBalance = await getWalletBalance(address, null);
+      if (!currentBalance || currentBalance <= 0) {
         setTxStatus('error');
-        setTxError('Wallet not connected');
-        toast.error('Wallet not connected');
+        setTxError('Insufficient balance. Please fund your wallet with Testnet4 BTC.');
+        toast.error('Insufficient balance. Please fund your wallet with Testnet4 BTC.');
         setIsMinting(false);
         return;
       }
+
+      // Step 2: Try to get UTXO for spell creation (but don't fail if unavailable)
+      let inUtxo: string | null = null;
+      let utxos: Array<{ txid: string; vout: number; value: number }> = [];
       
-      // Create spell and generate proof
+      // Try to fetch UTXOs - but be lenient
+      try {
+        utxos = await getWalletUtxos(address, null);
+        if (utxos.length > 0) {
+          console.log(`Found ${utxos.length} UTXOs, using first one: ${utxos[0].txid}:${utxos[0].vout}`);
+          inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
+        } else {
+          console.warn('No UTXOs found from wallet or mempool, but balance exists. Proceeding with balance check only.');
+          // If we have balance but no UTXOs, we can still try - the Prover API might handle it
+          // Or we can construct a dummy UTXO that will be resolved during PSBT creation
+          toast.info('UTXOs not yet indexed, but balance confirmed. Proceeding with transaction...');
+        }
+      } catch (utxoError) {
+        console.warn('UTXO fetch failed, but balance exists. Proceeding:', utxoError);
+        toast.info('Proceeding with transaction (UTXOs will be resolved during signing)...');
+      }
+
+      // Step 3: Create spell and generate proof
       setTxStatus('generating-proof');
+      toast.info('Creating spell and generating proof...');
+      
+      // If we don't have a UTXO, we need to provide one for the API
+      // The API requires an inUtxo, so we'll need to get one or construct it
+      if (!inUtxo) {
+        // Try one more time with a longer wait
+        console.log('Retrying UTXO fetch with longer wait...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        utxos = await getWalletUtxos(address, null);
+        if (utxos.length > 0) {
+          inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
+        } else {
+          // Last resort: we can't proceed without a UTXO for the API
+          setTxStatus('error');
+          const errorMsg = 'Unable to fetch UTXOs. Please wait a few moments for the network to sync, then try again.';
+          setTxError(errorMsg);
+          toast.error(errorMsg);
+          toast.info('Your wallet shows a balance, but UTXOs need to be indexed. This usually takes 1-2 minutes after receiving funds.');
+          setIsMinting(false);
+          return;
+        }
+      }
+
       const { spell, proof } = await mintGiftCard({
-        inUtxo,
+        inUtxo: inUtxo!,
         recipientAddress: address,
         brand: name,
         image: imageUrl,
@@ -165,138 +199,104 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         expirationDate: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60, // 1 year
       });
 
-      toast.success('Spell created! Proof generated. Signing transactions...');
+      toast.success('Spell created! Proof generated. Please approve the transaction in your wallet...');
       
-      // If proof contains transactions, sign and broadcast them
+      // Step 4: Sign transactions (THIS TRIGGERS WALLET POPUP)
       if (proof.commit_tx && proof.spell_tx) {
         try {
-          // Get UTXO info for signing
-          const utxos = await getWalletUtxos(address, null);
-          if (utxos.length === 0) {
-            throw new Error('No UTXOs available for signing');
-          }
-          
-          const utxo = utxos[0];
-          const utxoForSigning = {
-            txid: utxo.txid,
-            vout: utxo.vout,
-            amount: utxo.value,
-            address: address,
-          };
-          
           setTxStatus('signing');
-          toast.info('Attempting to sign transactions...');
+          toast.info('🔄 Please approve the transaction in your wallet popup...');
           
-          // Try to sign transactions using the signSpellTransactions function
-          // This will attempt wallet-specific methods automatically
-          try {
-            const { commitTx: signedCommitTx, spellTx: signedSpellTx } = await signSpellTransactions(
-              proof.commit_tx,
-              proof.spell_tx,
-              {
-                wallet: null, // Will use wallet-specific methods from window
-                utxo: utxoForSigning,
-              }
-            );
-            
-            // Check if transactions were actually signed (not just returned as-is)
-            const wasSigned = signedCommitTx !== proof.commit_tx || signedSpellTx !== proof.spell_tx;
-            
-            if (wasSigned || signedCommitTx || signedSpellTx) {
-              setTxStatus('broadcasting');
-              toast.info('Broadcasting transactions...');
-              const { commitTxid, spellTxid } = await broadcastSpellTransactions(
-                signedCommitTx,
-                signedSpellTx
-              );
-              
-              setCommitTxid(commitTxid);
-              setSpellTxid(spellTxid);
-              setTxStatus('confirming');
-              
-              toast.success(`✅ Gift card minted successfully!`);
-              toast.success(`Commit TX: ${commitTxid.substring(0, 16)}...`);
-              toast.success(`Spell TX: ${spellTxid.substring(0, 16)}...`);
-              
-              // Open explorer links
-              const explorerBase = 'https://mempool.space/testnet4/tx/';
-              console.log(`\n✅ Transactions broadcast successfully!`);
-              console.log(`Commit TX: ${explorerBase}${commitTxid}`);
-              console.log(`Spell TX: ${explorerBase}${spellTxid}`);
-              
-              // Store transaction IDs for reference
-              (window as any).lastMintTxids = { commitTxid, spellTxid };
-              
-              // Store in localStorage for transaction history
-              try {
-                const txHistory = JSON.parse(localStorage.getItem('charmCardsTxHistory') || '[]');
-                txHistory.push({
-                  type: 'mint',
-                  brand: name,
-                  image: imageUrl, // Store image URL for wallet display
-                  commitTxid,
-                  spellTxid,
-                  timestamp: Date.now(),
-                  amount: currentAmount,
-                });
-                localStorage.setItem('charmCardsTxHistory', JSON.stringify(txHistory));
-              } catch (e) {
-                console.warn('Failed to save transaction history:', e);
-              }
-              
-              // Mark as success after a short delay
-              setTimeout(() => {
-                setTxStatus('success');
-                // Trigger refresh and redirect to collection page after 3 seconds
-                if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('refreshWalletData'));
-                  setTimeout(() => {
-                    router.push('/wallet');
-                  }, 3000);
-                }
-              }, 2000);
-            } else {
-              throw new Error('Transactions were not signed');
+          // Sign transactions - this will convert hex to PSBT and trigger wallet popup
+          const { commitTx: signedCommitTx, spellTx: signedSpellTx } = await signSpellTransactions(
+            proof.commit_tx,
+            proof.spell_tx,
+            {
+              wallet: null, // Will use wallet-specific methods from window
+              address: address, // Pass address for PSBT conversion
+              utxo: utxos.length > 0 ? {
+                txid: utxos[0].txid,
+                vout: utxos[0].vout,
+                amount: utxos[0].value,
+                address: address,
+              } : undefined,
             }
-          } catch (signError: any) {
-            setTxStatus('error');
-            setTxError(signError.message || 'Signing failed');
-            // If signing failed, provide manual instructions
-            console.log('\n⚠️ Automatic signing not available. Manual signing required.');
-            console.log('Commit TX (hex):', proof.commit_tx);
-            console.log('Spell TX (hex):', proof.spell_tx);
-            console.log('UTXO:', utxoForSigning);
-            console.log('\n=== MANUAL SIGNING INSTRUCTIONS ===');
-            console.log('Note: Bitcoin wallets typically require PSBT format for signing.');
-            console.log('The Prover API returns raw transaction hex, which may need conversion.');
-            console.log('\nOptions:');
-            console.log('1. Use Charms CLI to sign: charms spell sign <spell.yaml>');
-            console.log('2. Convert hex to PSBT and use wallet\'s signPsbt method');
-            console.log('3. Use a Bitcoin node with RPC access for signing');
-            console.log('\nAfter signing, broadcast using:');
-            console.log('broadcastSpellTransactions(commitTx, spellTx)');
-            console.log('\nView on explorer: https://mempool.space/testnet4/tx/<txid>');
-            
-            toast.warning('Transactions prepared but require manual signing. Check console for details.');
-            toast.info('See console for transaction hex and signing instructions.');
+          );
+          
+          console.log('Transactions signed successfully!');
+          toast.success('✅ Transactions signed! Broadcasting to network...');
+          
+          // Step 5: Broadcast transactions
+          setTxStatus('broadcasting');
+          const { commitTxid, spellTxid } = await broadcastSpellTransactions(
+            signedCommitTx,
+            signedSpellTx
+          );
+          
+          setCommitTxid(commitTxid);
+          setSpellTxid(spellTxid);
+          setTxStatus('confirming');
+          
+          toast.success(`✅ Gift card minted successfully!`);
+          toast.success(`Commit TX: ${commitTxid.substring(0, 16)}...`);
+          toast.success(`Spell TX: ${spellTxid.substring(0, 16)}...`);
+          
+          // Open explorer links
+          const explorerBase = 'https://mempool.space/testnet4/tx/';
+          console.log(`\n✅ Transactions broadcast successfully!`);
+          console.log(`Commit TX: ${explorerBase}${commitTxid}`);
+          console.log(`Spell TX: ${explorerBase}${spellTxid}`);
+          
+          // Store transaction IDs for reference
+          (window as any).lastMintTxids = { commitTxid, spellTxid };
+          
+          // Store in localStorage for transaction history
+          try {
+            const txHistory = JSON.parse(localStorage.getItem('charmCardsTxHistory') || '[]');
+            txHistory.push({
+              type: 'mint',
+              brand: name,
+              image: imageUrl,
+              commitTxid,
+              spellTxid,
+              timestamp: Date.now(),
+              amount: currentAmount,
+            });
+            localStorage.setItem('charmCardsTxHistory', JSON.stringify(txHistory));
+          } catch (e) {
+            console.warn('Failed to save transaction history:', e);
           }
+          
+          // Mark as success after a short delay
+          setTimeout(() => {
+            setTxStatus('success');
+            // Trigger refresh and redirect to collection page after 3 seconds
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('refreshWalletData'));
+              setTimeout(() => {
+                router.push('/wallet');
+              }, 3000);
+            }
+          }, 2000);
         } catch (signError: any) {
           setTxStatus('error');
-          setTxError(signError.message || 'Transaction error');
-          console.error('Signing/broadcasting error:', signError);
-          toast.error(`Transaction error: ${signError.message}`);
-          console.log('\n=== ERROR DETAILS ===');
-          console.log('Commit TX (hex):', proof.commit_tx);
-          console.log('Spell TX (hex):', proof.spell_tx);
-          console.log('Error:', signError);
+          const errorMessage = signError.message || 'Signing failed';
+          setTxError(errorMessage);
+          
+          if (errorMessage.includes('rejected') || errorMessage.includes('denied')) {
+            toast.error('Transaction was rejected. Please try again and approve when prompted.');
+          } else {
+            toast.error(`Transaction signing failed: ${errorMessage}`);
+            console.error('Signing error details:', signError);
+            console.log('Commit TX (hex):', proof.commit_tx);
+            console.log('Spell TX (hex):', proof.spell_tx);
+          }
         }
       } else {
         setTxStatus('error');
         setTxError('Transactions not included in proof');
-        toast.success('Spell created! Proof generated.');
-        console.log('Spell:', spell);
-        console.log('Proof:', proof);
-        toast.warning('Transactions not included in proof. Check API response.');
+        toast.error('Proof generation failed - transactions not included in proof');
+        console.error('Proof missing transactions:', proof);
       }
     } catch (error: any) {
       setTxStatus('error');

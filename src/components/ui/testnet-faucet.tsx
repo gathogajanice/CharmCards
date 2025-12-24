@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { Coins, ExternalLink, Copy, Check, X, Bitcoin } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppKitAccount } from '@reown/appkit/react';
@@ -20,7 +21,7 @@ const TESTNET4_FAUCETS = [
   },
   {
     name: 'Coinfaucet.eu',
-    url: 'https://coinfaucet.eu/en/btc-testnet/',
+    url: 'https://coinfaucet.eu/en/btc-testnet4/',
     description: 'Reliable Testnet4 faucet',
   },
   {
@@ -94,24 +95,43 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
     }
   };
 
-  if (!isOpen) return null;
+  const [mounted, setMounted] = useState(false);
 
-  return (
+  useEffect(() => {
+    setMounted(true);
+    return () => setMounted(false);
+  }, []);
+
+  if (!mounted) return null;
+
+  const modalContent = (
     <AnimatePresence>
-      <div 
-        className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
-        onClick={(e) => {
-          if (e.target === e.currentTarget) {
-            onClose();
-          }
-        }}
-      >
-        <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          className="bg-background border border-border rounded-[16px] shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden"
-        >
+      {isOpen && (
+        <>
+          {/* Use high z-index to ensure modal appears above all content including navbar */}
+          <div 
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                onClose();
+              }
+            }}
+            onWheel={(e) => {
+              // Prevent backdrop from capturing scroll events
+              e.stopPropagation();
+            }}
+            style={{ overflow: 'hidden' }}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-background border border-border rounded-[16px] shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden relative z-[101]"
+              onClick={(e) => {
+                // Prevent clicks inside modal from closing it
+                e.stopPropagation();
+              }}
+            >
           {/* Header - Fixed */}
           <div className="flex items-start justify-between p-6 pb-4 border-b border-border flex-shrink-0">
             <div className="flex items-center gap-3 flex-1">
@@ -137,7 +157,13 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
           </div>
 
           {/* Scrollable Content */}
-          <div className="flex-1 overflow-y-auto p-6 pt-4">
+          <div 
+            className="flex-1 overflow-y-auto overflow-x-hidden p-6 pt-4"
+            style={{ 
+              WebkitOverflowScrolling: 'touch',
+              overscrollBehavior: 'contain'
+            }}
+          >
             {/* Bitcoin Balance Display */}
             {address && isConnected && (
               <div className="bg-primary/10 border border-primary/20 rounded-[12px] p-4 mb-4">
@@ -240,10 +266,15 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
             >
               Got it!
             </button>
-          </div>
-        </motion.div>
-      </div>
+            </div>
+          </motion.div>
+        </div>
+        </>
+      )}
     </AnimatePresence>
   );
+
+  // Render modal using portal to ensure it's always on top
+  return createPortal(modalContent, document.body);
 }
 
