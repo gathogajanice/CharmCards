@@ -5,6 +5,7 @@
  */
 
 import type { WalletCharms, CharmsAsset } from './types';
+import { hexToPsbtWithWalletUtxos, psbtToHex } from './psbt-converter';
 // Note: charms-wallet-js TransactionSigner requires PSBT format and mnemonic
 // For browser wallets, we'll use wallet adapter methods when available
 // import { TransactionSigner } from 'charms-wallet-js';
@@ -249,8 +250,7 @@ async function tryExtractGiftCardFromUtxo(
  * It commits to the spell to be inscribed, creating a Taproot output spendable
  * by the spell transaction.
  * 
- * Attempts to sign using wallet-specific methods (Unisat, Xverse, Leather)
- * or falls back to manual signing instructions.
+ * Converts raw hex to PSBT format, signs using wallet-specific methods, then extracts signed hex.
  */
 export async function signCommitTransaction(
   commitTxHex: string,
@@ -258,23 +258,42 @@ export async function signCommitTransaction(
     wallet?: any; // Bitcoin wallet adapter from @reown/appkit
     mnemonic?: string; // Mnemonic for charms-wallet-js signing
     utxo?: { txid: string; vout: number; amount: number; address: string }; // UTXO being spent
+    address?: string; // Wallet address for UTXO fetching
   }
 ): Promise<string> {
   try {
-    // Try wallet-specific signing methods
+    const address = options.address || options.utxo?.address;
+    if (!address) {
+      throw new Error('Address is required for PSBT conversion');
+    }
+
+    // Convert hex to PSBT format (required for wallet signing)
+    console.log('Converting commit transaction hex to PSBT...');
+    const psbtBase64 = await hexToPsbtWithWalletUtxos(commitTxHex, address);
+    console.log('PSBT created, requesting wallet signature...');
+
+    // Try wallet-specific signing methods with PSBT
     if (typeof window !== 'undefined') {
       // Try Unisat wallet
       if ((window as any).unisat) {
         try {
           const unisat = (window as any).unisat;
-          // Unisat uses signPsbt for PSBTs, but we have raw hex
-          // Convert hex to PSBT or use signMessage/signPsbt if available
           if (typeof unisat.signPsbt === 'function') {
-            // Note: This might need PSBT conversion first
-            return await unisat.signPsbt(commitTxHex);
+            console.log('Signing with Unisat wallet (popup should appear)...');
+            // Unisat signPsbt triggers popup - this is what we want!
+            const signedPsbt = await unisat.signPsbt(psbtBase64, {
+              autoFinalize: false, // Don't finalize, we'll extract the hex
+            });
+            console.log('Unisat signed PSBT, extracting transaction hex...');
+            // Extract signed transaction hex from PSBT
+            return psbtToHex(signedPsbt);
           }
         } catch (err: any) {
           console.warn('Unisat signing failed:', err);
+          if (err.code === 4001) {
+            throw new Error('Transaction rejected by user');
+          }
+          throw err;
         }
       }
       
@@ -283,22 +302,42 @@ export async function signCommitTransaction(
         try {
           const xverse = (window as any).XverseProviders.BitcoinProvider;
           if (typeof xverse.signPsbt === 'function') {
-            return await xverse.signPsbt(commitTxHex);
+            console.log('Signing with Xverse wallet (popup should appear)...');
+            // Xverse signPsbt should trigger popup
+            const signedPsbt = await xverse.signPsbt(psbtBase64);
+            console.log('Xverse signed PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
           }
         } catch (err: any) {
           console.warn('Xverse signing failed:', err);
+          if (err.code === 4001 || err.message?.includes('rejected') || err.message?.includes('denied')) {
+            throw new Error('Transaction rejected by user');
+          }
+          throw err;
         }
       }
       
       // Try Leather wallet
-      if ((window as any).btc) {
+      const leather = (window as any).btc || (window as any).hiroWalletProvider;
+      if (leather) {
         try {
-          const leather = (window as any).btc;
           if (typeof leather.signPsbt === 'function') {
-            return await leather.signPsbt(commitTxHex);
+            console.log('Signing with Leather wallet (popup should appear)...');
+            const signedPsbt = await leather.signPsbt(psbtBase64);
+            console.log('Leather signed PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
+          } else if (typeof leather.request === 'function') {
+            console.log('Signing with Leather wallet via request (popup should appear)...');
+            const signedPsbt = await leather.request('signPsbt', { psbt: psbtBase64 });
+            console.log('Leather signed PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
           }
         } catch (err: any) {
           console.warn('Leather signing failed:', err);
+          if (err.code === 4001 || err.message?.includes('rejected') || err.message?.includes('denied')) {
+            throw new Error('Transaction rejected by user');
+          }
+          throw err;
         }
       }
     }
@@ -309,8 +348,11 @@ export async function signCommitTransaction(
       return signedTx;
     }
     
-    throw new Error('No signing method available. Wallet signing requires wallet-specific APIs or manual signing.');
+    throw new Error('No signing method available. Please ensure your wallet is connected and supports PSBT signing.');
   } catch (error: any) {
+    if (error.message?.includes('rejected') || error.message?.includes('denied')) {
+      throw error; // Re-throw user rejection errors as-is
+    }
     throw new Error(`Failed to sign commit transaction: ${error.message}`);
   }
 }
@@ -323,6 +365,7 @@ export async function signCommitTransaction(
  * The corresponding witness already contains the signature for spending this output.
  * The wallet needs to sign the rest of the transaction (other inputs/outputs if any).
  * 
+ * Converts raw hex to PSBT format, signs using wallet-specific methods, then extracts signed hex.
  * Note: According to Charms docs, the spell transaction witness is already prepared
  * by the Prover API, so this may only need signing if there are additional inputs.
  */
@@ -332,20 +375,43 @@ export async function signSpellTransaction(
     wallet?: any; // Bitcoin wallet adapter from @reown/appkit
     mnemonic?: string; // Mnemonic for charms-wallet-js signing
     utxo?: { txid: string; vout: number; amount: number; address: string }; // UTXO being spent
+    address?: string; // Wallet address for UTXO fetching
   }
 ): Promise<string> {
   try {
-    // Try wallet-specific signing methods (same as commit transaction)
+    const address = options.address || options.utxo?.address;
+    if (!address) {
+      throw new Error('Address is required for PSBT conversion');
+    }
+
+    // Convert hex to PSBT format (required for wallet signing)
+    console.log('Converting spell transaction hex to PSBT...');
+    const psbtBase64 = await hexToPsbtWithWalletUtxos(spellTxHex, address);
+    console.log('PSBT created, requesting wallet signature...');
+
+    // Try wallet-specific signing methods with PSBT
     if (typeof window !== 'undefined') {
       // Try Unisat wallet
       if ((window as any).unisat) {
         try {
           const unisat = (window as any).unisat;
           if (typeof unisat.signPsbt === 'function') {
-            return await unisat.signPsbt(spellTxHex);
+            console.log('Signing spell transaction with Unisat wallet (popup should appear)...');
+            const signedPsbt = await unisat.signPsbt(psbtBase64, {
+              autoFinalize: false,
+            });
+            console.log('Unisat signed spell PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
           }
         } catch (err: any) {
-          console.warn('Unisat signing failed:', err);
+          console.warn('Unisat spell signing failed:', err);
+          if (err.code === 4001) {
+            throw new Error('Transaction rejected by user');
+          }
+          // If signing fails, the spell transaction might already be signed by Prover API
+          // Try returning as-is
+          console.warn('Returning spell transaction as-is (may already be signed by Prover API)');
+          return spellTxHex;
         }
       }
       
@@ -354,22 +420,43 @@ export async function signSpellTransaction(
         try {
           const xverse = (window as any).XverseProviders.BitcoinProvider;
           if (typeof xverse.signPsbt === 'function') {
-            return await xverse.signPsbt(spellTxHex);
+            console.log('Signing spell transaction with Xverse wallet (popup should appear)...');
+            const signedPsbt = await xverse.signPsbt(psbtBase64);
+            console.log('Xverse signed spell PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
           }
         } catch (err: any) {
-          console.warn('Xverse signing failed:', err);
+          console.warn('Xverse spell signing failed:', err);
+          if (err.code === 4001 || err.message?.includes('rejected') || err.message?.includes('denied')) {
+            throw new Error('Transaction rejected by user');
+          }
+          // Return as-is if signing not needed
+          return spellTxHex;
         }
       }
       
       // Try Leather wallet
-      if ((window as any).btc) {
+      const leather = (window as any).btc || (window as any).hiroWalletProvider;
+      if (leather) {
         try {
-          const leather = (window as any).btc;
           if (typeof leather.signPsbt === 'function') {
-            return await leather.signPsbt(spellTxHex);
+            console.log('Signing spell transaction with Leather wallet (popup should appear)...');
+            const signedPsbt = await leather.signPsbt(psbtBase64);
+            console.log('Leather signed spell PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
+          } else if (typeof leather.request === 'function') {
+            console.log('Signing spell transaction with Leather wallet via request (popup should appear)...');
+            const signedPsbt = await leather.request('signPsbt', { psbt: psbtBase64 });
+            console.log('Leather signed spell PSBT, extracting transaction hex...');
+            return psbtToHex(signedPsbt);
           }
         } catch (err: any) {
-          console.warn('Leather signing failed:', err);
+          console.warn('Leather spell signing failed:', err);
+          if (err.code === 4001 || err.message?.includes('rejected') || err.message?.includes('denied')) {
+            throw new Error('Transaction rejected by user');
+          }
+          // Return as-is if signing not needed
+          return spellTxHex;
         }
       }
     }
@@ -382,8 +469,12 @@ export async function signSpellTransaction(
     
     // Note: Spell transaction may already be signed by Prover API
     // Return as-is if no additional signing needed
+    console.log('No wallet signing method available, returning spell transaction as-is (may already be signed)');
     return spellTxHex;
   } catch (error: any) {
+    if (error.message?.includes('rejected') || error.message?.includes('denied')) {
+      throw error; // Re-throw user rejection errors as-is
+    }
     throw new Error(`Failed to sign spell transaction: ${error.message}`);
   }
 }
@@ -391,6 +482,8 @@ export async function signSpellTransaction(
 /**
  * Sign both commit and spell transactions
  * Supports both charms-wallet-js (with mnemonic) and wallet adapter methods
+ * 
+ * This function will trigger wallet popups for user approval of both transactions.
  */
 export async function signSpellTransactions(
   commitTxHex: string,
@@ -399,10 +492,29 @@ export async function signSpellTransactions(
     wallet?: any; // Bitcoin wallet adapter from @reown/appkit
     mnemonic?: string; // Mnemonic for charms-wallet-js signing
     utxo?: { txid: string; vout: number; amount: number; address: string }; // UTXO being spent
+    address?: string; // Wallet address for UTXO fetching
   }
 ): Promise<{ commitTx: string; spellTx: string }> {
-  const commitTx = await signCommitTransaction(commitTxHex, options);
-  const spellTx = await signSpellTransaction(spellTxHex, options);
+  // Ensure address is available
+  const address = options.address || options.utxo?.address;
+  if (!address) {
+    throw new Error('Address is required for transaction signing');
+  }
+
+  const signingOptions = {
+    ...options,
+    address,
+  };
+
+  // Sign commit transaction first (this will trigger wallet popup)
+  console.log('Signing commit transaction...');
+  const commitTx = await signCommitTransaction(commitTxHex, signingOptions);
+  console.log('Commit transaction signed successfully');
+
+  // Then sign spell transaction (this will trigger another wallet popup)
+  console.log('Signing spell transaction...');
+  const spellTx = await signSpellTransaction(spellTxHex, signingOptions);
+  console.log('Spell transaction signed successfully');
   
   return { commitTx, spellTx };
 }
@@ -477,7 +589,10 @@ export async function getWalletBalance(
   if (typeof window === 'undefined') return null;
 
   try {
-    // Try to get balance directly from wallet (Unisat, Xverse, etc.)
+    // Try to get balance directly from wallet (Unisat, Xverse, Leather)
+    // All wallets work the same way - try their getBalance method first
+    
+    // Unisat
     if ((window as any).unisat && typeof (window as any).unisat.getBalance === 'function') {
       try {
         const balance = await (window as any).unisat.getBalance();
@@ -500,7 +615,7 @@ export async function getWalletBalance(
       }
     }
 
-    // Try Xverse
+    // Xverse - same pattern as Unisat
     if ((window as any).XverseProviders?.BitcoinProvider) {
       const xverse = (window as any).XverseProviders.BitcoinProvider;
       if (typeof xverse.getBalance === 'function') {
@@ -513,16 +628,39 @@ export async function getWalletBalance(
           if (typeof balance === 'string') {
             return parseFloat(balance);
           }
+          // Xverse might return object with total/confirmed
+          if (balance && typeof balance.total === 'number') {
+            return balance.total;
+          }
+          if (balance && typeof balance.confirmed === 'number') {
+            return balance.confirmed;
+          }
         } catch (error) {
           console.warn('Failed to get balance from Xverse:', error);
         }
       }
+      // Also try request method for Xverse
+      if (typeof xverse.request === 'function') {
+        try {
+          const response = await xverse.request('getBalance', {});
+          const balance = typeof response === 'object' ? (response?.total || response?.confirmed || response) : response;
+          if (typeof balance === 'number') {
+            return balance;
+          }
+          if (typeof balance === 'string') {
+            return parseFloat(balance);
+          }
+        } catch (error) {
+          console.warn('Failed to get balance from Xverse via request:', error);
+        }
+      }
     }
 
-    // Try Leather
-    if ((window as any).btc && typeof (window as any).btc.getBalance === 'function') {
+    // Leather - same pattern as Unisat
+    const leather = (window as any).btc || (window as any).hiroWalletProvider;
+    if (leather && typeof leather.getBalance === 'function') {
       try {
-        const balance = await (window as any).btc.getBalance();
+        const balance = await leather.getBalance();
         console.log('Balance from Leather wallet:', balance);
         if (typeof balance === 'number') {
           return balance;
@@ -530,15 +668,37 @@ export async function getWalletBalance(
         if (typeof balance === 'string') {
           return parseFloat(balance);
         }
+        // Leather might return object with total/confirmed
+        if (balance && typeof balance.total === 'number') {
+          return balance.total;
+        }
+        if (balance && typeof balance.confirmed === 'number') {
+          return balance.confirmed;
+        }
       } catch (error) {
         console.warn('Failed to get balance from Leather:', error);
+      }
+    }
+    // Also try request method for Leather
+    if (leather && typeof leather.request === 'function') {
+      try {
+        const response = await leather.request('getBalance', {});
+        const balance = typeof response === 'object' ? (response?.total || response?.confirmed || response) : response;
+        if (typeof balance === 'number') {
+          return balance;
+        }
+        if (typeof balance === 'string') {
+          return parseFloat(balance);
+        }
+      } catch (error) {
+        console.warn('Failed to get balance from Leather via request:', error);
       }
     }
   } catch (error) {
     console.warn('Failed to get balance from wallet:', error);
   }
 
-  // Fallback: calculate from UTXOs
+  // Fallback: calculate from UTXOs (works for all wallets)
   const utxos = await getWalletUtxos(address, wallet);
   if (utxos.length > 0) {
     const totalSats = utxos.reduce((sum, utxo) => sum + utxo.value, 0);
@@ -550,68 +710,252 @@ export async function getWalletBalance(
 
 /**
  * Get available UTXOs from connected wallet
- * Uses mempool.space API to fetch UTXOs for any Bitcoin address
+ * First tries wallet APIs, then falls back to mempool.space API
  */
 export async function getWalletUtxos(
   address: string,
-  wallet: any // Optional wallet parameter (not currently used)
+  wallet: any // Optional wallet parameter
 ): Promise<Array<{ txid: string; vout: number; value: number }>> {
-  try {
-    // Use mempool.space API to fetch UTXOs
-    // This works for any Bitcoin address on Testnet4
-    const explorerUrl = NETWORK === 'testnet4'
-      ? `https://mempool.space/testnet4/api/address/${address}/utxo`
-      : `https://mempool.space/api/address/${address}/utxo`;
-    
-    console.log('Fetching UTXOs from:', explorerUrl);
-    const response = await cachedFetch(explorerUrl);
-    
-    if (response.ok) {
-      const utxos = await response.json();
-      console.log(`Fetched ${utxos.length} UTXOs for address ${address}`);
-      
-      const mappedUtxos = utxos.map((utxo: any) => ({
-        txid: utxo.txid,
-        vout: utxo.vout,
-        value: utxo.value,
-      }));
-      
-      // Also try to get address balance directly as a fallback
+  // Try wallet-specific UTXO methods first (if available)
+  if (typeof window !== 'undefined') {
+    // Try Unisat wallet - check multiple methods
+    if ((window as any).unisat) {
       try {
-        const balanceUrl = NETWORK === 'testnet4'
-          ? `https://mempool.space/testnet4/api/address/${address}`
-          : `https://mempool.space/api/address/${address}`;
+        const unisat = (window as any).unisat;
         
-        const balanceResponse = await cachedFetch(balanceUrl);
-        if (balanceResponse.ok) {
-          const addressData = await balanceResponse.json();
-          console.log('Address data from mempool:', addressData);
-          
-          // Log balance info for debugging
-          if (addressData.chain_stats) {
-            const confirmed = addressData.chain_stats.funded_txo_sum - addressData.chain_stats.spent_txo_sum;
-            console.log('Confirmed balance (sats):', confirmed);
-          }
-          if (addressData.mempool_stats) {
-            const unconfirmed = addressData.mempool_stats.funded_txo_sum - addressData.mempool_stats.spent_txo_sum;
-            console.log('Unconfirmed balance (sats):', unconfirmed);
+        // Method 1: Try listUnspent
+        if (typeof unisat.listUnspent === 'function') {
+          const utxos = await unisat.listUnspent();
+          if (utxos && Array.isArray(utxos) && utxos.length > 0) {
+            console.log(`Fetched ${utxos.length} UTXOs from Unisat wallet (listUnspent)`);
+            return utxos.map((utxo: any) => ({
+              txid: utxo.txid || utxo.txId || utxo.tx_hash,
+              vout: utxo.vout !== undefined ? utxo.vout : (utxo.outputIndex !== undefined ? utxo.outputIndex : (utxo.index !== undefined ? utxo.index : 0)),
+              value: utxo.value || utxo.satoshis || utxo.amount || 0,
+            }));
           }
         }
-      } catch (balanceError) {
-        console.warn('Failed to fetch address balance:', balanceError);
+        
+        // Method 2: Try getInscriptions (might include UTXO info)
+        if (typeof unisat.getInscriptions === 'function') {
+          try {
+            const inscriptions = await unisat.getInscriptions();
+            if (inscriptions && Array.isArray(inscriptions) && inscriptions.length > 0) {
+              // Extract UTXO info from inscriptions
+              const utxos = inscriptions.map((ins: any) => ({
+                txid: ins.txid || ins.txId || ins.tx_hash,
+                vout: ins.vout !== undefined ? ins.vout : (ins.outputIndex !== undefined ? ins.outputIndex : 0),
+                value: ins.value || ins.satoshis || 0,
+              }));
+              if (utxos.length > 0) {
+                console.log(`Fetched ${utxos.length} UTXOs from Unisat wallet (via inscriptions)`);
+                return utxos;
+              }
+            }
+          } catch (insError) {
+            console.warn('Failed to get UTXOs from Unisat inscriptions:', insError);
+          }
+        }
+        
+        // Method 3: Try request method
+        if (typeof unisat.request === 'function') {
+          try {
+            const response = await unisat.request('listUnspent', {});
+            if (response && Array.isArray(response) && response.length > 0) {
+              console.log(`Fetched ${response.length} UTXOs from Unisat wallet (via request)`);
+              return response.map((utxo: any) => ({
+                txid: utxo.txid || utxo.txId || utxo.tx_hash,
+                vout: utxo.vout !== undefined ? utxo.vout : (utxo.outputIndex !== undefined ? utxo.outputIndex : 0),
+                value: utxo.value || utxo.satoshis || utxo.amount || 0,
+              }));
+            }
+          } catch (reqError) {
+            console.warn('Failed to get UTXOs from Unisat via request:', reqError);
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to get UTXOs from Unisat:', error);
       }
-      
-      return mappedUtxos;
-    } else {
-      console.warn('Failed to fetch UTXOs:', response.status, response.statusText);
-      const errorText = await response.text();
-      console.warn('Error response:', errorText);
     }
-  } catch (error) {
-    console.error('Failed to fetch UTXOs from explorer:', error);
+
+    // Try Xverse wallet - check multiple methods
+    if ((window as any).XverseProviders?.BitcoinProvider) {
+      try {
+        const xverse = (window as any).XverseProviders.BitcoinProvider;
+        
+        // Method 1: Try getUtxos
+        if (typeof xverse.getUtxos === 'function') {
+          const utxos = await xverse.getUtxos();
+          if (utxos && Array.isArray(utxos) && utxos.length > 0) {
+            console.log(`Fetched ${utxos.length} UTXOs from Xverse wallet (getUtxos)`);
+            return utxos.map((utxo: any) => ({
+              txid: utxo.txid || utxo.txId || utxo.tx_hash,
+              vout: utxo.vout !== undefined ? utxo.vout : (utxo.outputIndex !== undefined ? utxo.outputIndex : 0),
+              value: utxo.value || utxo.satoshis || utxo.amount || 0,
+            }));
+          }
+        }
+        
+        // Method 2: Try request method
+        if (typeof xverse.request === 'function') {
+          try {
+            const response = await xverse.request('getUtxos', {});
+            if (response && Array.isArray(response) && response.length > 0) {
+              console.log(`Fetched ${response.length} UTXOs from Xverse wallet (via request)`);
+              return response.map((utxo: any) => ({
+                txid: utxo.txid || utxo.txId || utxo.tx_hash,
+                vout: utxo.vout !== undefined ? utxo.vout : (utxo.outputIndex !== undefined ? utxo.outputIndex : 0),
+                value: utxo.value || utxo.satoshis || utxo.amount || 0,
+              }));
+            }
+          } catch (reqError) {
+            console.warn('Failed to get UTXOs from Xverse via request:', reqError);
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to get UTXOs from Xverse:', error);
+      }
+    }
+
+    // Try Leather wallet
+    const leather = (window as any).btc || (window as any).hiroWalletProvider;
+    if (leather) {
+      try {
+        if (typeof leather.getUtxos === 'function') {
+          const utxos = await leather.getUtxos();
+          if (utxos && Array.isArray(utxos) && utxos.length > 0) {
+            console.log(`Fetched ${utxos.length} UTXOs from Leather wallet`);
+            return utxos.map((utxo: any) => ({
+              txid: utxo.txid || utxo.txId,
+              vout: utxo.vout || utxo.outputIndex || 0,
+              value: utxo.value || utxo.satoshis || 0,
+            }));
+          }
+        } else if (typeof leather.request === 'function') {
+          const response = await leather.request('getUtxos', {});
+          if (response && Array.isArray(response) && response.length > 0) {
+            console.log(`Fetched ${response.length} UTXOs from Leather wallet via request`);
+            return response.map((utxo: any) => ({
+              txid: utxo.txid || utxo.txId,
+              vout: utxo.vout || utxo.outputIndex || 0,
+              value: utxo.value || utxo.satoshis || 0,
+            }));
+          }
+        }
+      } catch (error) {
+        console.warn('Failed to get UTXOs from Leather:', error);
+      }
+    }
+  }
+
+  // Fallback: Use mempool.space API (bypass cache to ensure fresh data)
+  // Try multiple times with different approaches
+  const maxRetries = 2;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const explorerUrl = NETWORK === 'testnet4'
+        ? `https://mempool.space/testnet4/api/address/${address}/utxo`
+        : `https://mempool.space/api/address/${address}/utxo`;
+      
+      console.log(`Fetching UTXOs from mempool.space (attempt ${attempt + 1}/${maxRetries}):`, explorerUrl);
+      
+      // Bypass cache for UTXO fetching to ensure we get fresh data
+      // Create timeout controller for better browser compatibility
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      const response = await fetch(explorerUrl, { 
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Accept': 'application/json',
+        },
+        signal: controller.signal,
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const utxos = await response.json();
+        console.log(`Fetched ${utxos.length} UTXOs from mempool.space for address ${address}`);
+        
+        if (Array.isArray(utxos) && utxos.length > 0) {
+          const mappedUtxos = utxos.map((utxo: any) => ({
+            txid: utxo.txid || utxo.tx_hash,
+            vout: utxo.vout !== undefined ? utxo.vout : (utxo.index !== undefined ? utxo.index : 0),
+            value: utxo.value || utxo.amount || 0,
+          }));
+          
+          return mappedUtxos;
+        } else {
+          console.warn('mempool.space returned empty UTXO array');
+          // If this is not the last attempt, wait and retry
+          if (attempt < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+        }
+      } else {
+        console.warn(`Failed to fetch UTXOs from mempool.space (attempt ${attempt + 1}):`, response.status, response.statusText);
+        const errorText = await response.text();
+        console.warn('Error response:', errorText);
+        
+        // If we get a 400 error, try to get address info to verify
+        if (response.status === 400) {
+          console.warn('Got 400 error - checking address info...');
+          try {
+            const addressUrl = NETWORK === 'testnet4'
+              ? `https://mempool.space/testnet4/api/address/${address}`
+              : `https://mempool.space/api/address/${address}`;
+            const addrController = new AbortController();
+            const addrTimeoutId = setTimeout(() => addrController.abort(), 10000);
+            const addressResponse = await fetch(addressUrl, { 
+              cache: 'no-store',
+              signal: addrController.signal,
+            });
+            clearTimeout(addrTimeoutId);
+            if (addressResponse.ok) {
+              const addressData = await addressResponse.json();
+              console.log('Address data from mempool:', addressData);
+              
+              if (addressData.chain_stats) {
+                const confirmed = addressData.chain_stats.funded_txo_sum - addressData.chain_stats.spent_txo_sum;
+                console.log('Confirmed balance (sats):', confirmed);
+                if (confirmed > 0) {
+                  console.warn('Address has balance but UTXOs endpoint returned 400. This might be a mempool.space API issue or indexing delay.');
+                  // Try alternative API endpoint
+                  if (attempt < maxRetries - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    continue;
+                  }
+                }
+              }
+            }
+          } catch (addrError) {
+            console.warn('Failed to fetch address info:', addrError);
+          }
+        }
+        
+        // Retry on 5xx errors
+        if (response.status >= 500 && attempt < maxRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+      }
+    } catch (error: any) {
+      console.error(`Failed to fetch UTXOs from explorer (attempt ${attempt + 1}):`, error);
+      if (error.name === 'TimeoutError') {
+        console.warn('Request timed out, will retry...');
+        if (attempt < maxRetries - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+      }
+    }
   }
   
-  // Fallback: return empty array
+  // Return empty array if all methods failed
+  console.warn('No UTXOs found for address:', address);
   return [];
 }
 

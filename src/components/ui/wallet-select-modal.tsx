@@ -136,9 +136,9 @@ export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModal
       let address: string | null = null;
       let walletName: string | null = null;
 
+      // All wallets work the same way - try direct connection first (triggers popup)
+      // If that fails, fall back to AppKit
       if (walletId === 'unisat') {
-        // For Unisat, try direct connection first (faster and more reliable)
-        // If that works, we'll sync with AppKit via page reload
         try {
           address = await connectUnisatDirectly();
           walletName = 'unisat';
@@ -150,32 +150,33 @@ export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModal
           // If direct connection fails, use AppKit as fallback
           console.warn('Direct Unisat connection failed, using AppKit:', error);
           toast.info('Opening wallet selection...');
-          // Close custom modal first, then open AppKit
           onClose();
-          // Small delay to ensure modal closes before opening AppKit
           setTimeout(() => {
-            open({ view: 'Networks' }); // Open with Networks view to show Bitcoin wallets
+            // Open AppKit with default view to show wallets directly
+            open();
           }, 300);
           setIsConnecting(null);
           return;
         }
       } else if (walletId === 'xverse') {
-        // Try direct Xverse connection first
+        // Xverse works the same way as Unisat
         try {
           const { connectXverseDirectly } = await import('@/lib/charms/wallet-connection');
           address = await connectXverseDirectly();
           walletName = 'xverse';
+          
+          if (!address) {
+            throw new Error('Xverse connection returned no address');
+          }
         } catch (error: any) {
-          console.warn('Direct Xverse connection failed, trying AppKit:', error);
-          // Show error but also try AppKit
-          toast.error(error.message || 'Direct connection failed. Opening wallet selection...');
-          // Close custom modal first, then open AppKit
+          // If direct connection fails, use AppKit as fallback (same as Unisat)
+          console.warn('Direct Xverse connection failed, using AppKit:', error);
+          toast.info('Opening wallet selection...');
           onClose();
-          // Small delay to ensure modal closes before opening AppKit
           setTimeout(() => {
             try {
-              // Try to open AppKit modal - it should detect Xverse automatically
-              open({ view: 'Networks' });
+              // Open AppKit with default view to show wallets directly
+              open();
             } catch (appKitError) {
               console.error('Failed to open AppKit modal:', appKitError);
               toast.error('Please connect your wallet manually through the browser extension.');
@@ -185,19 +186,23 @@ export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModal
           return;
         }
       } else if (walletId === 'leather') {
-        // Try direct Leather connection first
+        // Leather works the same way as Unisat
         try {
           const { connectLeatherDirectly } = await import('@/lib/charms/wallet-connection');
           address = await connectLeatherDirectly();
           walletName = 'leather';
+          
+          if (!address) {
+            throw new Error('Leather connection returned no address');
+          }
         } catch (error: any) {
-          console.warn('Direct Leather connection failed, trying AppKit:', error);
+          // If direct connection fails, use AppKit as fallback (same as Unisat)
+          console.warn('Direct Leather connection failed, using AppKit:', error);
           toast.info('Opening wallet selection...');
-          // Close custom modal first, then open AppKit
           onClose();
-          // Small delay to ensure modal closes before opening AppKit
           setTimeout(() => {
-            open({ view: 'Networks' }); // Open with Networks view to show Bitcoin wallets
+            // Open AppKit with default view to show wallets directly
+            open();
           }, 300);
           setIsConnecting(null);
           return;
@@ -223,36 +228,33 @@ export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModal
   const handlePostConnection = async (address: string, walletName: string) => {
     toast.success(`${walletName.charAt(0).toUpperCase() + walletName.slice(1)} wallet connected!`);
     
-    // Check network and auto-switch to Testnet4 if needed
+    // Automatically connect and switch network using connectAndSwitchNetwork
+    // This will trigger both connection and network switch popups if needed
     try {
-      const currentNetwork = await getNetworkFromWallet(walletName || undefined);
-      console.log('Current network after connection:', currentNetwork);
+      const { connectAndSwitchNetwork } = await import('@/lib/charms/network');
       
-      if (currentNetwork !== 'testnet4') {
-        toast.info('Switching to Bitcoin Testnet4 (required for Charms)...');
-        
-        // Attempt to switch network
-        const switched = await attemptNetworkSwitch(walletName || undefined);
-        
-        if (switched) {
-          toast.success('Network switched to Testnet4!');
-        } else {
-          toast.warning(
-            'Please manually switch to Testnet4 in your wallet. ' +
-            'Charms requires Bitcoin Testnet4 network.'
-          );
-        }
+      toast.info('Switching to Bitcoin Testnet4...');
+      
+      // This will automatically connect (if not already) and switch network
+      const result = await connectAndSwitchNetwork(walletName);
+      
+      if (result.connected && result.switched) {
+        toast.success('Wallet connected and switched to Testnet4!');
+      } else if (result.connected) {
+        toast.info('Wallet connected! Please approve network switch in the popup.');
+      } else if (result.switched) {
+        toast.success('Network switched to Testnet4!');
       } else {
-        toast.success('Connected to Testnet4 ✓');
+        toast.warning('Please approve the connection and network switch in your wallet popup.');
       }
     } catch (networkError: any) {
-      console.warn('Network check/switching failed:', networkError);
+      console.warn('Network switch failed:', networkError);
       toast.warning('Please ensure your wallet is on Bitcoin Testnet4 network.');
     }
 
     onClose();
     // Reload to sync with AppKit
-    setTimeout(() => window.location.reload(), 1000);
+    setTimeout(() => window.location.reload(), 1500);
   };
 
   return (
@@ -353,7 +355,9 @@ export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModal
                     onClick={() => {
                       onClose();
                       setTimeout(() => {
-                        open({ view: 'Networks' });
+                        // Open AppKit with default view (shows wallets directly)
+                        // This will show all available wallets including Bitcoin wallets
+                        open();
                       }, 300);
                     }}
                     className="w-full h-12 px-4 rounded-xl border-2 border-[#2A9DFF] bg-[#2A9DFF]/5 hover:bg-[#2A9DFF]/10 transition-all flex items-center justify-center gap-2"

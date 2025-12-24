@@ -192,8 +192,9 @@ export default function Navbar() {
                       return;
                     }
                     // Try to open AppKit directly first (it should detect wallets)
+                    // Open with default view to show wallets directly
                     try {
-                      open({ view: 'Networks' });
+                      open();
                     } catch (error) {
                       // Fallback to custom modal if AppKit fails
                       console.warn('AppKit modal failed, showing custom modal:', error);

@@ -113,11 +113,13 @@ export default function BurnGiftCardModal({ isOpen, onClose, giftCard }: BurnGif
         toast.info('Please approve the burn transaction in your wallet...');
 
         const utxo = utxos[0];
+        toast.info('🔄 Please approve the transaction in your wallet popup...');
         const { commitTx: signedCommitTx, spellTx: signedSpellTx } = await signSpellTransactions(
           proof.commit_tx,
           proof.spell_tx,
           {
             wallet: null,
+            address: address, // Pass address for PSBT conversion
             utxo: {
               txid: utxo.txid,
               vout: utxo.vout,
