@@ -3,7 +3,6 @@
 import Image from "next/image";
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Gift, Users, DollarSign } from "lucide-react";
 
 const bannerImages = [
   "/image.png",
@@ -15,6 +14,14 @@ const bannerImages = [
 export default function HeroBanner() {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [direction, setDirection] = useState(0);
+  const [currentTextIndex, setCurrentTextIndex] = useState(0);
+  
+  const rotatingTexts = [
+    "Mint gift cards as Bitcoin NFTs with programmable balance",
+    "Get your gift cards directly in your Bitcoin wallet",
+    "Powered by Charms protocol - no bridges, no third parties",
+    "Create, transfer, and redeem gift cards on Bitcoin blockchain"
+  ];
 
   // Preload all images for smooth transitions
   useEffect(() => {
@@ -33,6 +40,13 @@ export default function HeroBanner() {
     }, 8000); // Change slide every 8 seconds
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const textTimer = setInterval(() => {
+      setCurrentTextIndex((prev) => (prev + 1) % rotatingTexts.length);
+    }, 4000); // Change text every 4 seconds
+    return () => clearInterval(textTimer);
+  }, [rotatingTexts.length]);
 
   const slideVariants = {
     enter: (direction: number) => ({
@@ -125,29 +139,41 @@ export default function HeroBanner() {
             Charm Cards
           </h1>
 
-          <div className="flex items-center gap-0 mt-4 rounded-full bg-white/10 backdrop-blur-md border border-white/20 overflow-hidden shadow-2xl mx-4">
-            <div className="flex flex-col items-center px-4 sm:px-6 md:px-8 lg:px-10 py-3 sm:py-4 md:py-5 border-r border-white/20">
-              <span className="text-white/60 text-[9px] sm:text-[10px] font-black uppercase tracking-widest">Brands</span>
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <span className="text-white text-lg sm:text-xl md:text-2xl font-black font-bricolage">500+</span>
-                <Gift className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-              </div>
+          <div className="flex items-center gap-3 sm:gap-4 mt-4 flex-wrap justify-center px-4">
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 backdrop-blur-md border border-white/20">
+              <span className="text-white text-[11px] sm:text-[12px] font-medium">Secure</span>
             </div>
-            <div className="flex flex-col items-center px-4 sm:px-6 md:px-8 lg:px-10 py-3 sm:py-4 md:py-5 border-r border-white/20">
-              <span className="text-white/60 text-[9px] sm:text-[10px] font-black uppercase tracking-widest">Users</span>
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <span className="text-white text-lg sm:text-xl md:text-2xl font-black font-bricolage">52K</span>
-                <Users className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-              </div>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 backdrop-blur-md border border-white/20">
+              <span className="text-white text-[11px] sm:text-[12px] font-medium">Instant</span>
             </div>
-            <div className="flex flex-col items-center px-4 sm:px-6 md:px-8 lg:px-10 py-3 sm:py-4 md:py-5">
-              <span className="text-white/60 text-[9px] sm:text-[10px] font-black uppercase tracking-widest">Sales</span>
-              <div className="flex items-center gap-1.5 sm:gap-2">
-                <span className="text-white text-lg sm:text-xl md:text-2xl font-black font-bricolage">$497K</span>
-                <DollarSign className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-              </div>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 backdrop-blur-md border border-white/20">
+              <span className="text-white text-[11px] sm:text-[12px] font-medium">Transferable</span>
+            </div>
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 backdrop-blur-md border border-white/20">
+              <span className="text-white text-[11px] sm:text-[12px] font-medium">On-Chain</span>
             </div>
           </div>
+
+          {/* Rotating Feature Text */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.5, duration: 0.6 }}
+            className="mt-4 text-center"
+          >
+            <AnimatePresence mode="wait">
+              <motion.p
+                key={currentTextIndex}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={{ duration: 0.4 }}
+                className="text-white/80 text-[12px] sm:text-[13px] font-medium px-4"
+              >
+                {rotatingTexts[currentTextIndex]}
+              </motion.p>
+            </AnimatePresence>
+          </motion.div>
         </motion.div>
       </div>
 

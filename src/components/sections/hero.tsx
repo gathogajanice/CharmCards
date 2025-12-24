@@ -199,6 +199,14 @@ const featuredGiftCards = [
       outOfStock: false,
       category: 'shopping',
     },
+    {
+      name: 'Expedia',
+      range: '$25 - $1,000',
+      image: 'https://logos-world.net/wp-content/uploads/2021/08/Expedia-Logo.png',
+      href: '/gift-card/expedia-us',
+      outOfStock: false,
+      category: 'travel',
+    },
 ];
 
 const containerVariants = {
@@ -215,7 +223,6 @@ const containerVariants = {
 const Hero = () => {
   const [mainTab, setMainTab] = useState('gift-cards');
   const [activeFilter, setActiveFilter] = useState('All');
-  const [currentTextIndex, setCurrentTextIndex] = useState(0);
   const router = useRouter();
   
   // Get available categories from cards (keep original case for matching)
@@ -234,21 +241,6 @@ const Hero = () => {
   const excludedFilters = ['Shopping', 'Gaming'];
   const filteredCategories = availableCategories.filter(cat => !excludedFilters.includes(cat));
   const filters = ['All', 'Popular', ...filteredCategories];
-  
-  const rotatingTexts = [
-    { first: 'Browse', second: 'Gift Cards.' },
-    { first: 'Shop', second: 'NFT Cards.' },
-    { first: 'Get', second: 'In Wallet.' },
-    { first: 'Powered by', second: 'Charms.' }
-  ];
-  
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentTextIndex((prev) => (prev + 1) % rotatingTexts.length);
-    }, 8000); // Change text every 8 seconds
-    
-    return () => clearInterval(interval);
-  }, [rotatingTexts.length]);
   
   // Filter cards based on active filter
   const filteredCards = React.useMemo(() => {
@@ -292,39 +284,23 @@ const Hero = () => {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
         >
-            <div className="flex flex-col gap-2">
-              <span className="text-[#2A9DFF] font-black uppercase tracking-[0.3em] text-[10px] sm:text-[11px] md:text-[12px]">Bitcoin NFT Gift Cards • Secure & Transferable</span>
-              <h1 className="text-[36px] sm:text-[48px] md:text-[64px] lg:text-[80px] font-black leading-[0.8] tracking-tighter text-black font-bricolage">
-                <span className="text-black relative inline-block min-w-[150px] sm:min-w-[200px] md:min-w-[280px] h-[1.1em] block">
-                  <AnimatePresence mode="wait">
-                    <motion.span
-                      key={currentTextIndex}
-                      initial={{ opacity: 0, x: "100%" }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: "-100%" }}
-                      transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-                      className="absolute left-0 top-0 whitespace-nowrap"
-                    >
-                      {rotatingTexts[currentTextIndex].first}
-                    </motion.span>
-                  </AnimatePresence>
-                </span>
-                <br className="-mt-1" />
-                <span className="text-black/20 relative inline-block min-w-[150px] sm:min-w-[200px] md:min-w-[280px] h-[1.1em] block -mt-1">
-                  <AnimatePresence mode="wait">
-                    <motion.span
-                      key={currentTextIndex}
-                      initial={{ opacity: 0, x: "100%" }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: "-100%" }}
-                      transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-                      className="absolute left-0 top-0 whitespace-nowrap"
-                    >
-                      {rotatingTexts[currentTextIndex].second}
-                    </motion.span>
-                  </AnimatePresence>
-                </span>
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[#2A9DFF] font-black uppercase tracking-[0.3em] text-[10px] sm:text-[11px] md:text-[12px]">Bitcoin NFT Gift Cards</span>
+                <div className="flex items-center gap-1 px-1.5 py-0.5 bg-[#F7931A]/10 rounded-full border border-[#F7931A]/20">
+                  <svg className="w-2.5 h-2.5 text-[#F7931A]" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M23.638 14.904c-1.602 6.43-8.113 10.34-14.542 8.736C2.67 22.05-1.243 15.525.362 9.105 1.962 2.67 8.475-1.243 14.9.358c6.43 1.605 10.342 8.115 8.738 14.546z"/>
+                  </svg>
+                  <span className="text-[8px] font-black text-[#F7931A] uppercase tracking-wider">BTC</span>
+                </div>
+                <span className="text-[9px] text-black/40 font-medium">• Powered by Charms</span>
+              </div>
+              <h1 className="text-[36px] sm:text-[48px] md:text-[64px] lg:text-[80px] font-black leading-[0.9] tracking-tighter text-black font-bricolage">
+                Gift Cards
               </h1>
+              <p className="text-[14px] sm:text-[15px] md:text-[16px] text-black/60 font-medium max-w-2xl mt-2">
+                Bitcoin NFTs with programmable balance. Each card is secured on Bitcoin's blockchain using Charms protocol - no bridges, no third parties, just Bitcoin-native assets you truly own. Select a card to create.
+              </p>
             </div>
             
             <div className="flex items-center gap-2 sm:gap-4 bg-black/5 p-1.5 rounded-full backdrop-blur-md border border-black/5">
@@ -384,6 +360,18 @@ const Hero = () => {
             </div>
         </motion.div>
 
+          {/* Call to Action */}
+          <motion.div 
+            className="mb-8 text-center"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3, duration: 0.6 }}
+          >
+            <p className="text-[15px] sm:text-[16px] text-black/70 font-medium">
+              Select any card below to create your Bitcoin NFT →
+            </p>
+          </motion.div>
+
           <div id="gift-cards-section" className="pb-16 sm:pb-24 md:pb-32">
             {displayCards.length === 0 ? (
               <motion.div
@@ -399,61 +387,18 @@ const Hero = () => {
                 </p>
               </motion.div>
             ) : (
-              (() => {
-                // Group cards into rows ensuring each row has at least 4 cards
-                const minCardsPerRow = 4;
-                const rows: typeof displayCards[] = [];
-                
-                // Calculate how many full rows we can make
-                const fullRows = Math.floor(displayCards.length / minCardsPerRow);
-                const remainingCards = displayCards.length % minCardsPerRow;
-                
-                // Create full rows
-                for (let i = 0; i < fullRows; i++) {
-                  rows.push(displayCards.slice(i * minCardsPerRow, (i + 1) * minCardsPerRow));
-                }
-                
-                // Handle remaining cards: distribute them to previous rows if less than 4
-                if (remainingCards > 0 && remainingCards < minCardsPerRow) {
-                  // Distribute remaining cards to previous rows
-                  let cardIndex = fullRows * minCardsPerRow;
-                  for (let i = 0; i < remainingCards && rows.length > 0; i++) {
-                    const targetRowIndex = (rows.length - 1 - i) % rows.length;
-                    rows[targetRowIndex].push(displayCards[cardIndex]);
-                    cardIndex++;
-                  }
-                } else if (remainingCards >= minCardsPerRow) {
-                  // If we have 4 or more remaining, create a new row
-                  rows.push(displayCards.slice(fullRows * minCardsPerRow));
-                }
-                
-                return (
-                  <>
-                    {rows.map((row, rowIndex) => (
-                      <React.Fragment key={rowIndex}>
-                          {rowIndex > 0 && (
-                            <div className="h-px bg-black/[0.04] my-8 sm:my-10 md:my-12" />
-                          )}
-          <motion.div 
-                            className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 sm:gap-5 md:gap-6 lg:gap-8 mb-6 sm:mb-8"
-            variants={containerVariants}
-            initial="hidden"
-            animate="visible"
-          >
-                          {row.map((card, cardIndex) => {
-                            const globalIndex = displayCards.indexOf(card);
-                            return (
-                              <div key={card.name} className="pb-6">
-                                <ProductCard card={card} index={globalIndex} />
-                              </div>
-                            );
-                          })}
-                        </motion.div>
-                      </React.Fragment>
-                    ))}
-                  </>
-                );
-              })()
+              <motion.div 
+                className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 sm:gap-5 md:gap-6 lg:gap-8"
+                variants={containerVariants}
+                initial="hidden"
+                animate="visible"
+              >
+                {displayCards.map((card, index) => (
+                  <div key={card.name} className="pb-6">
+                    <ProductCard card={card} index={index} />
+                  </div>
+                ))}
+              </motion.div>
             )}
           </div>
 

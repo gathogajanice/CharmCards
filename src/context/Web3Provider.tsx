@@ -54,7 +54,10 @@ createAppKit({
     'e58b292e92c253907c1b5046200236a6', // Xverse
     '1ae152b1263d893f40f065363b96324d', // Leather
   ],
-  allWallets: 'show', 
+  allWallets: 'show',
+  enableEIP6963: true, // Enable EIP-6963 for better wallet detection
+  enableCoinbase: false,
+  enableInjected: true, // Enable injected wallet detection
   themeMode: 'light',
   themeVariables: {
     '--w3m-accent': '#2A9DFF',
