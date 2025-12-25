@@ -80,32 +80,38 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
 
       // Create redeem spell - decreases balance while keeping NFT
       // Based on redeem-balance.yaml spell template
+      // Spell JSON format per: https://docs.charms.dev/references/spell-json/
       const redeemSpell = {
-        version: 8,
+        version: 8, // Protocol version (8 is current Charms protocol version)
         apps: {
+          // App identifiers: NFT app ($00) and Token app ($01)
+          // Format: "app_type/app_id/app_vk" per Charms Spell JSON reference
           "$00": `n/${giftCard.tokenId}/${giftCard.tokenId}`, // NFT app
           "$01": `t/${giftCard.tokenId}/${giftCard.tokenId}`, // Token app
         },
+        // Input UTXOs containing charms (per Spell JSON reference)
         ins: [
           {
-            utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`,
+            utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`, // Format: "txid:vout"
             charms: {
-              "$00": giftCard.nftMetadata,
-              "$01": Math.floor(giftCard.balance * 100), // Current balance in cents
+              "$00": giftCard.nftMetadata, // NFT metadata
+              "$01": Math.floor(giftCard.balance * 100), // Current token balance in cents
             },
           },
         ],
+        // Output destinations for charms (per Spell JSON reference)
         outs: [
           {
-            address: address, // Keep NFT in same wallet
+            address: address, // Keep NFT in same wallet (Taproot address)
             charms: {
               "$00": {
+                // NFT with updated remaining balance
                 ...giftCard.nftMetadata,
-                remaining_balance: Math.floor(remainingBalance * 100), // Updated balance
+                remaining_balance: Math.floor(remainingBalance * 100), // Updated balance in cents
               },
-              "$01": Math.floor(remainingBalance * 100), // Remaining token balance
+              "$01": Math.floor(remainingBalance * 100), // Remaining token balance in cents
             },
-            sats: 1000,
+            sats: 1000, // Required: Bitcoin output value in satoshis
           },
         ],
       };

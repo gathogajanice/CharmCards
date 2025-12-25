@@ -78,29 +78,34 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
 
       // Create transfer spell
       // Based on Charms NFT transfer documentation: https://docs.charms.dev/guides/wallet-integration/transactions/nft/
+      // Spell JSON format per: https://docs.charms.dev/references/spell-json/
       const transferSpell = {
-        version: 8,
+        version: 8, // Protocol version (8 is current Charms protocol version)
         apps: {
+          // App identifiers: NFT app ($00) and Token app ($01)
+          // Format: "app_type/app_id/app_vk" per Charms Spell JSON reference
           "$00": `n/${giftCard.tokenId}/${giftCard.tokenId}`, // NFT app
           "$01": `t/${giftCard.tokenId}/${giftCard.tokenId}`, // Token app
         },
+        // Input UTXOs containing charms (per Spell JSON reference)
         ins: [
           {
-            utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`,
+            utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`, // Format: "txid:vout"
             charms: {
-              "$00": giftCard.nftMetadata,
-              "$01": Math.floor(giftCard.balance * 100), // Convert to cents
+              "$00": giftCard.nftMetadata, // NFT metadata
+              "$01": Math.floor(giftCard.balance * 100), // Token balance in cents
             },
           },
         ],
+        // Output destinations for charms (per Spell JSON reference)
         outs: [
           {
-            address: recipientAddress,
+            address: recipientAddress, // Recipient Bitcoin address (Taproot format)
             charms: {
-              "$00": giftCard.nftMetadata,
-              "$01": Math.floor(giftCard.balance * 100),
+              "$00": giftCard.nftMetadata, // Transfer NFT
+              "$01": Math.floor(giftCard.balance * 100), // Transfer full token balance
             },
-            sats: 1000,
+            sats: 1000, // Required: Bitcoin output value in satoshis
           },
         ],
       };
