@@ -1,13 +1,12 @@
 "use client";
 
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { useParams } from 'next/navigation';
-import Image from 'next/image';
 import Navbar from '@/components/sections/navbar';
 import Footer from '@/components/sections/footer';
-import { ChevronDown, Info } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import GiftCardPurchase from '@/components/sections/gift-card-purchase';
+import { useAppKitAccount } from '@reown/appkit/react';
 
 // Gift card data - matches featuredGiftCards from hero section
 const giftCardData: Record<string, {
@@ -103,7 +102,7 @@ const giftCardData: Record<string, {
   'expedia-us': {
     name: 'Expedia',
     description: 'Book flights, hotels, car rentals, and vacation packages. Use your Bitcoin NFT gift card to plan your next trip.',
-    image: 'https://logos-world.net/wp-content/uploads/2021/08/Expedia-Logo.png',
+    image: 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/Expedia_logo.svg/2560px-Expedia_logo.svg.png',
     denominations: [25, 50, 100, 200, 500, 1000],
     customRange: { min: 25, max: 1000 },
     country: 'US',
@@ -117,8 +116,48 @@ export default function GiftCardPage() {
   const params = useParams();
   const router = useRouter();
   const slug = params.slug as string;
+  const { address, isConnected } = useAppKitAccount();
   // Gift card data will be loaded from on-chain data
   const card = giftCardData[slug] || null;
+
+  // Ensure wallet authorization when page loads and wallet is connected
+  // This prevents the "source has not been authorized yet" error
+  useEffect(() => {
+    const ensureAuth = async () => {
+      if (!isConnected || !address) return;
+      
+      try {
+        const { ensureWalletAuthorization } = await import('@/lib/charms/wallet');
+        await ensureWalletAuthorization();
+      } catch (error: any) {
+        // Log but don't throw - authorization will be requested when user interacts
+        if (error.message?.includes('not authorized') || error.message?.includes('not been authorized')) {
+          console.log('ℹ️ Wallet authorization needed - will be requested when user interacts');
+        } else {
+          console.log('Authorization check on page load:', error.message || error);
+        }
+      }
+    };
+
+    ensureAuth();
+    
+    // Also set up a global error handler to catch authorization errors
+    const handleError = (event: ErrorEvent) => {
+      if (event.message?.includes('not been authorized') || event.message?.includes('not authorized')) {
+        console.log('🔐 Detected authorization error, requesting wallet authorization...');
+        ensureAuth().catch(() => {
+          // Ignore errors from ensureAuth itself
+        });
+        // Prevent the error from showing in console
+        event.preventDefault();
+      }
+    };
+    
+    window.addEventListener('error', handleError);
+    return () => {
+      window.removeEventListener('error', handleError);
+    };
+  }, [isConnected, address]);
   
   if (!card) {
     return (

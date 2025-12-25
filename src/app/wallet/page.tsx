@@ -667,7 +667,7 @@ export default function WalletPage() {
                         onClick={(e) => {
                           e.stopPropagation();
                           if (card.transactionHash) {
-                            window.open(`https://mempool.space/testnet4/tx/${card.transactionHash}`, '_blank');
+                            window.open(`https://memepool.space/testnet4/tx/${card.transactionHash}`, '_blank');
                           } else {
                             toast.info('Transaction hash not available');
                           }

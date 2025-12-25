@@ -8,6 +8,8 @@ import * as yaml from 'js-yaml';
 const PROVER_API_URL = process.env.NEXT_PUBLIC_PROVER_API_URL || 'https://v8.charms.dev/spells/prove';
 
 export interface ProofRequest {
+  version: number; // Must be 8
+  chain: string; // Must be "bitcoin"
   spell: any; // Spell object (parsed YAML)
   app_bins?: string; // App binary path
   prev_txs?: string; // Previous transactions hex
@@ -15,10 +17,8 @@ export interface ProofRequest {
 }
 
 export interface ProofResponse {
-  proof: string;
-  public_inputs: any;
-  commit_tx?: string; // Commit transaction hex
-  spell_tx?: string; // Spell transaction hex
+  commit_tx: string; // Commit transaction hex
+  spell_tx: string; // Spell transaction hex
 }
 
 /**
@@ -39,7 +39,10 @@ export async function generateProof(
   const spellObj = yaml.load(spellYaml);
   
   // Build payload according to ProveRequest format
+  // Based on: https://github.com/CharmsDev/charms/blob/435635988c3d611c847ef46b2fd0c9d4d83bc81c/src/spell.rs#L694
   const payload: ProofRequest = {
+    version: 8, // Required top-level field
+    chain: 'bitcoin', // Required top-level field
     spell: spellObj,
   };
   
@@ -68,6 +71,17 @@ export async function generateProof(
     throw new Error(error.error || 'Failed to generate proof');
   }
 
-  return await response.json();
+  // API returns array: ["hex_encoded_commit_tx", "hex_encoded_spell_tx"]
+  const txArray = await response.json();
+  
+  if (!Array.isArray(txArray) || txArray.length !== 2) {
+    throw new Error('Invalid response format from Prover API. Expected array of 2 transaction hex strings.');
+  }
+
+  // Map array response to object format for backward compatibility
+  return {
+    commit_tx: txArray[0],
+    spell_tx: txArray[1],
+  };
 }
 

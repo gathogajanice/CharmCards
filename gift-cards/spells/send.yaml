@@ -10,9 +10,11 @@ ins:
 
 outs:
   - address: ${addr_3}
+    sats: 1000
     charms:
       $01: 420
 
   - address: ${addr_4}
+    sats: 1000
     charms:
       $01: 69000

@@ -44,8 +44,8 @@ export default function TransactionStatus({
 
   const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
   const explorerBase = NETWORK === 'testnet4' 
-    ? 'https://mempool.space/testnet4/tx/'
-    : 'https://mempool.space/tx/';
+    ? 'https://memepool.space/testnet4/tx/'
+    : 'https://memepool.space/tx/';
   const charmsExplorerBase = 'https://explorer.charms.dev';
 
   return (

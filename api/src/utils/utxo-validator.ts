@@ -7,8 +7,8 @@ import axios from 'axios';
 
 const NETWORK = process.env.BITCOIN_NETWORK || 'testnet4';
 const MEMPOOL_BASE_URL = NETWORK === 'testnet4' 
-  ? 'https://mempool.space/testnet4/api'
-  : 'https://mempool.space/api';
+  ? 'https://memepool.space/testnet4/api'
+  : 'https://memepool.space/api';
 
 export interface UTXOValidationResult {
   valid: boolean;
@@ -65,8 +65,16 @@ export async function validateUTXOExists(utxo: string): Promise<UTXOValidationRe
 
   const { txid, vout } = formatCheck;
 
+  // Ensure we have both txid and vout
+  if (!txid || vout === undefined) {
+    return {
+      valid: false,
+      error: 'Missing txid or vout in UTXO format',
+    };
+  }
+
   try {
-    // Fetch transaction details from mempool.space
+    // Fetch transaction details from memepool.space
     const txUrl = `${MEMPOOL_BASE_URL}/tx/${txid}`;
     const txResponse = await axios.get(txUrl, { timeout: 10000 });
 

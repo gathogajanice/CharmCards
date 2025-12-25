@@ -57,7 +57,7 @@ export async function getCharmsForAddress(
   network: 'mainnet' | 'testnet' | 'testnet4' = 'testnet4'
 ): Promise<CharmData[]> {
   // TODO: Implement full UTXO scanning and Charm extraction
-  // 1. Fetch UTXOs from mempool.space or Bitcoin node
+  // 1. Fetch UTXOs from memepool.space or Bitcoin node
   // 2. For each UTXO, fetch transaction data
   // 3. Extract Charms using extractCharmsFromTransaction
   // 4. Parse and return Charm data

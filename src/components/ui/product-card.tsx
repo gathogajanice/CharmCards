@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import Image from 'next/image';
-import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { ArrowRight } from 'lucide-react';
 
@@ -32,6 +32,15 @@ const itemVariants = {
 
 export function ProductCard({ card, index }: ProductCardProps) {
   const [imageError, setImageError] = useState(false);
+  const router = useRouter();
+
+  const handleCardClick = () => {
+    if (card.outOfStock) {
+      return;
+    }
+    // Use router.push for faster client-side navigation
+    router.push(card.href);
+  };
 
   return (
     <motion.div
@@ -43,10 +52,9 @@ export function ProductCard({ card, index }: ProductCardProps) {
       transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
       className="w-full"
     >
-      <Link 
-        href={card.href}
-        prefetch={true}
-        className={`group relative flex flex-col w-full font-bricolage ${card.outOfStock ? 'cursor-not-allowed pointer-events-none' : 'cursor-pointer'}`}
+      <div
+        onClick={handleCardClick}
+        className={`group relative flex flex-col w-full font-bricolage block ${card.outOfStock ? 'cursor-not-allowed' : 'cursor-pointer'}`}
       >
       <div className="relative flex flex-col p-2.5 sm:p-3 rounded-[2rem] sm:rounded-[2.5rem] bg-black border border-white/10 shadow-[0_4px_20px_rgba(0,0,0,0.3)] transition-all duration-500 group-hover:shadow-[0_20px_40px_rgba(0,0,0,0.5)] group-hover:border-white/20 overflow-hidden">
         {/* Subtle inner glow on hover */}
@@ -110,7 +118,7 @@ export function ProductCard({ card, index }: ProductCardProps) {
             {card.name}
           </h3>
 
-          <div className="mt-1 p-3 sm:p-4 rounded-full bg-[#2A9DFF] hover:bg-[#1A8DFF] flex justify-between items-center transition-all duration-500 shadow-[0_10px_25px_rgba(42,157,255,0.3)] overflow-hidden relative cursor-pointer">
+          <div className="mt-1 p-3 sm:p-4 rounded-full bg-[#2A9DFF] hover:bg-[#1A8DFF] flex justify-between items-center transition-all duration-500 shadow-[0_10px_25px_rgba(42,157,255,0.3)] overflow-hidden relative pointer-events-none">
             <div className="absolute inset-0 bg-gradient-to-r from-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
             <div className="flex flex-col relative z-10">
               <span className="text-[8px] sm:text-[9px] text-white/70 font-black uppercase tracking-[0.15em] mb-0.5">Price Range</span>
@@ -128,7 +136,7 @@ export function ProductCard({ card, index }: ProductCardProps) {
           </div>
         </div>
       </div>
-      </Link>
+      </div>
     </motion.div>
   );
 }

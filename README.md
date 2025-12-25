@@ -3,7 +3,7 @@
 **Create, transfer, and redeem programmable gift cards directly on Bitcoin using the Charms Protocol.**
 
 [![Charms Protocol](https://img.shields.io/badge/Charms-Protocol-orange)](https://charms.dev)
-[![Bitcoin Testnet4](https://img.shields.io/badge/Network-Testnet4-blue)](https://mempool.space/testnet4)
+[![Bitcoin Testnet4](https://img.shields.io/badge/Network-Testnet4-blue)](https://memepool.space/testnet4)
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 ---
@@ -92,7 +92,7 @@ PROVER_API_URL=https://v8.charms.dev/spells/prove
 ```env
 NEXT_PUBLIC_API_URL=http://localhost:3001
 NEXT_PUBLIC_BITCOIN_NETWORK=testnet4
-NEXT_PUBLIC_CHARMS_EXPLORER_URL=https://mempool.space/testnet4
+NEXT_PUBLIC_CHARMS_EXPLORER_URL=https://memepool.space/testnet4
 NEXT_PUBLIC_PROVER_API_URL=https://v8.charms.dev/spells/prove
 ```
 
@@ -240,7 +240,7 @@ charms app vk
    - Navigate to any gift card
    - Select amount
    - Click "Mint with Charms"
-   - Verify on mempool.space/testnet4
+   - Verify on memepool.space/testnet4
 
 ---
 
@@ -257,7 +257,7 @@ charms app vk
 - [Charms Documentation](https://docs.charms.dev)
 - [Charms Wallet Integration](https://docs.charms.dev/guides/wallet-integration/)
 - [Bitcoin Testnet4 Faucet](https://bitcoinfaucet.uo1.net/)
-- [Mempool Explorer Testnet4](https://mempool.space/testnet4)
+- [Mempool Explorer Testnet4](https://memepool.space/testnet4)
 
 ---
 

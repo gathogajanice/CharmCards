@@ -40,3 +40,31 @@ export function formatBalance(bal: number | null | undefined): string {
   return bal.toString();
 }
 
+/**
+ * Format sats in a compact way - avoid unnecessary zeros, use abbreviations
+ * Examples: "100k sats", "1.5M sats", "500 sats", "50 sats"
+ */
+export function formatSatsCompact(sats: number | null | undefined): string {
+  if (sats === null || sats === undefined || sats === 0) return '0 sats';
+  
+  // Convert to integer if needed
+  const satsInt = Math.floor(sats);
+  
+  // For very large amounts (millions)
+  if (satsInt >= 1_000_000) {
+    const millions = satsInt / 1_000_000;
+    // Remove trailing zeros
+    return `${millions.toFixed(2).replace(/\.?0+$/, '')}M sats`;
+  }
+  
+  // For thousands
+  if (satsInt >= 1_000) {
+    const thousands = satsInt / 1_000;
+    // Remove trailing zeros
+    return `${thousands.toFixed(1).replace(/\.?0+$/, '')}k sats`;
+  }
+  
+  // For amounts less than 1000, show as-is
+  return `${satsInt} sats`;
+}
+

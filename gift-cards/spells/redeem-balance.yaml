@@ -18,6 +18,7 @@ ins:
 
 outs:
   - address: ${user_address}
+    sats: 1000
     charms:
       $00:
         brand: "${brand}"
