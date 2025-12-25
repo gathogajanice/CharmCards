@@ -229,7 +229,7 @@ export class CharmsService {
       
       // Build payload according to Prover API format
       // Based on: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/
-      // prev_txs must be an array of objects with {chain, hex}, one for each input UTXO in the spell
+      // prev_txs must be an array of hex strings (one for each input UTXO in the spell)
       let prevTxsArray: string[] = [];
       if (prevTxs) {
         if (Array.isArray(prevTxs)) {
@@ -265,20 +265,26 @@ export class CharmsService {
         console.warn('⚠️ App binary available but encoding not implemented - using empty binaries');
       }
       
-      // Add required funding fields
-      if (fundingUtxo) {
-        payload.funding_utxo = fundingUtxo;
+      // Add required funding fields (all required per Prover API docs)
+      if (!fundingUtxo) {
+        throw new Error('funding_utxo is required by Prover API but was not provided');
       }
+      payload.funding_utxo = fundingUtxo;
       
-      if (fundingUtxoValue !== undefined) {
-        payload.funding_utxo_value = fundingUtxoValue;
+      if (fundingUtxoValue === undefined || fundingUtxoValue === null) {
+        throw new Error('funding_utxo_value is required by Prover API but was not provided');
       }
+      payload.funding_utxo_value = fundingUtxoValue;
       
-      if (changeAddress) {
-        payload.change_address = changeAddress;
+      if (!changeAddress) {
+        throw new Error('change_address is required by Prover API but was not provided');
       }
+      payload.change_address = changeAddress;
       
       // Fee rate in sats per byte (default 2.0 as per docs)
+      if (feeRate === undefined || feeRate === null) {
+        feeRate = 2.0; // Default from docs
+      }
       payload.fee_rate = feeRate;
       
       // Validate spell outputs have sats field (required for Bitcoin)
