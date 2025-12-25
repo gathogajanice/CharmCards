@@ -1,9 +1,12 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import * as path from 'path';
 import giftCardsRoutes from './routes/gift-cards';
+import utxoRoutes from './routes/utxo';
 
-dotenv.config();
+// Load .env file from api directory
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -15,6 +18,19 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api/gift-cards', giftCardsRoutes);
+app.use('/api/utxo', utxoRoutes);
+
+// Root route - API status
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'charm-cards-api',
+    version: '1.0.0',
+    network: process.env.BITCOIN_NETWORK || 'testnet4',
+    endpoints: ['/health', '/api/gift-cards', '/api/utxo'],
+    message: 'Charm Cards API is running. Visit /health for health check.'
+  });
+});
 
 // Health check
 app.get('/health', (req, res) => {

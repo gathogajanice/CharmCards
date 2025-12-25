@@ -1,18 +1,18 @@
 /**
  * Explorer URL utilities for viewing transactions
- * Supports both mempool.space (Bitcoin) and Charms explorer
+ * Supports both memepool.space (Bitcoin) and Charms explorer
  */
 
 const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
 const MEMPOOL_BASE = NETWORK === 'testnet4' 
-  ? 'https://mempool.space/testnet4'
-  : 'https://mempool.space';
+  ? 'https://memepool.space/testnet4'
+  : 'https://memepool.space';
 
 // Charms explorer (when available)
 const CHARMS_EXPLORER_BASE = 'https://explorer.charms.dev';
 
 /**
- * Get mempool.space transaction URL
+ * Get memepool.space transaction URL
  */
 export function getMempoolTxUrl(txid: string): string {
   return `${MEMPOOL_BASE}/tx/${txid}`;
@@ -24,7 +24,7 @@ export function getMempoolTxUrl(txid: string): string {
  */
 export function getCharmsExplorerUrl(txid: string, type?: 'spell' | 'commit'): string {
   // Charms explorer might use different URL format
-  // For now, link to mempool.space with note about Charms
+  // For now, link to memepool.space with note about Charms
   // TODO: Update when Charms explorer URL structure is confirmed
   return `${MEMPOOL_BASE}/tx/${txid}`;
 }
@@ -37,7 +37,7 @@ export function getGiftCardExplorerUrl(tokenId: string, txid?: string): string {
     return getMempoolTxUrl(txid);
   }
   // If no txid, try to find via token ID
-  // For now, return mempool.space address search
+  // For now, return memepool.space address search
   return `${MEMPOOL_BASE}/address/${tokenId}`;
 }
 

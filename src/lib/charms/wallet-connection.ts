@@ -39,6 +39,8 @@ export async function connectXverseDirectly(): Promise<string | null> {
     }
     
     // Request connection - this triggers Xverse popup (same as Unisat requestAccounts)
+    // This explicitly authorizes the origin for signing transactions
+    console.log('🔐 Requesting Xverse authorization for this origin...');
     console.log('Requesting Xverse connection - popup should appear...');
     
     // Method 1: Try request with getAccounts (most common - triggers popup)
@@ -47,7 +49,7 @@ export async function connectXverseDirectly(): Promise<string | null> {
         const response = await xverse.request('getAccounts', {});
         accounts = Array.isArray(response) ? response : (response?.accounts || []);
         if (accounts && accounts.length > 0) {
-          console.log('Xverse connected via request:', accounts[0]);
+          console.log('✅ Xverse connected and authorized via request:', accounts[0]);
           return accounts[0];
         }
       } catch (reqError: any) {
@@ -145,6 +147,8 @@ export async function connectLeatherDirectly(): Promise<string | null> {
     }
     
     // Request connection - this triggers Leather popup (same as Unisat requestAccounts)
+    // This explicitly authorizes the origin for signing transactions
+    console.log('🔐 Requesting Leather authorization for this origin...');
     console.log('Requesting Leather connection - popup should appear...');
     
     // Method 1: Try request with getAccounts (triggers popup)
@@ -153,7 +157,7 @@ export async function connectLeatherDirectly(): Promise<string | null> {
         const response = await leather.request('getAccounts', {});
         accounts = Array.isArray(response) ? response : (response?.accounts || []);
         if (accounts && accounts.length > 0) {
-          console.log('Leather connected via request:', accounts[0]);
+          console.log('✅ Leather connected and authorized via request:', accounts[0]);
           return accounts[0];
         }
       } catch (reqError: any) {
@@ -233,12 +237,14 @@ export async function connectUnisatDirectly(): Promise<string | null> {
   }
 
   try {
-    // Request account access
+    // Request account access - this explicitly authorizes the origin
+    // This is the key step that grants authorization for signing transactions
+    console.log('🔐 Requesting Unisat authorization for this origin...');
     const accounts = await unisat.requestAccounts();
     
     if (accounts && accounts.length > 0) {
       const address = accounts[0];
-      console.log('Unisat connected directly:', address);
+      console.log('✅ Unisat connected and authorized:', address);
       return address;
     }
     

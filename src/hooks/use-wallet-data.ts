@@ -118,8 +118,8 @@ export function useTransactionPolling(
 
       const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
       const explorerUrl = NETWORK === 'testnet4'
-        ? `https://mempool.space/testnet4/api/tx/${commitTxid}`
-        : `https://mempool.space/api/tx/${commitTxid}`;
+        ? `https://memepool.space/testnet4/api/tx/${commitTxid}`
+        : `https://memepool.space/api/tx/${commitTxid}`;
 
       try {
         const response = await fetch(explorerUrl, { cache: 'no-store' });

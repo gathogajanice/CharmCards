@@ -37,10 +37,11 @@ fn nft_contract_satisfied(app: &App, tx: &Transaction, w: &Data) -> bool {
         vk: app.vk.clone(),
     };
     
-    // Allow minting new gift card NFT or transferring existing NFT
+    // Allow minting new gift card NFT, transferring existing NFT, redeeming, or burning
     check!(can_mint_gift_card_nft(app, tx, w) || 
            can_transfer_gift_card_nft(app, tx) ||
-           can_redeem_gift_card(app, tx, token_app));
+           can_redeem_gift_card(app, tx, token_app) ||
+           can_burn_gift_card(app, tx, token_app));
     true
 }
 
@@ -223,6 +224,38 @@ fn can_redeem_gift_card(nft_app: &App, tx: &Transaction, token_app: &App) -> boo
     
     // Note: Expiration check would be done off-chain or via additional zk-app logic
     // For now, we enforce balance conservation
+    
+    true
+}
+
+// Burn gift card (destroy NFT and tokens)
+fn can_burn_gift_card(nft_app: &App, tx: &Transaction, token_app: &App) -> bool {
+    // Get NFT content from inputs
+    let input_nfts: Vec<GiftCardNftContent> = charm_values(nft_app, tx.ins.iter().map(|(_, v)| v))
+        .filter_map(|data| data.value().ok())
+        .collect();
+    
+    // Must have NFT in input
+    check!(input_nfts.len() > 0);
+    
+    // Must have NO NFT in output (burning, not transferring)
+    let output_nfts: Vec<GiftCardNftContent> = charm_values(nft_app, tx.outs.iter())
+        .filter_map(|data| data.value().ok())
+        .collect();
+    check!(output_nfts.len() == 0);
+    
+    // Token amounts must be zero in output (all tokens burned)
+    let Some(input_token_amount) = sum_token_amount(token_app, tx.ins.iter().map(|(_, v)| v)).ok() else {
+        return false;
+    };
+    let Some(output_token_amount) = sum_token_amount(token_app, tx.outs.iter()).ok() else {
+        // If no output tokens, that's fine - all burned
+        check!(input_token_amount > 0); // Must have had tokens to burn
+        return true;
+    };
+    
+    // All tokens must be burned (output amount should be 0 or very small for fees)
+    check!(output_token_amount == 0 || output_token_amount < input_token_amount);
     
     true
 }

@@ -3,13 +3,20 @@
  * Handles transaction fee calculations for Charms gift card minting
  */
 
-// Minimum fee buffer to ensure transactions go through
-// This covers both commit and spell transactions
-export const MIN_FEE_BUFFER_SATS = 5000; // 5000 sats = ~$0.25 at current prices
+// Get current network (testnet or mainnet)
+const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
+const IS_TESTNET = NETWORK === 'testnet4' || NETWORK === 'testnet';
 
-// Estimated fee per transaction (commit + spell = 2 transactions)
-export const ESTIMATED_FEE_PER_TX_SATS = 1000; // Conservative estimate
-export const ESTIMATED_TOTAL_FEE_SATS = ESTIMATED_FEE_PER_TX_SATS * 2; // 2000 sats for both
+// Network-aware fee configuration
+// Testnet: Very low fees (testnet coins have no value)
+// Mainnet: Higher fees for safety and faster confirmation
+export const ESTIMATED_FEE_PER_TX_SATS = IS_TESTNET ? 250 : 1000; // Testnet: 250 sats/tx, Mainnet: 1000 sats/tx
+export const ESTIMATED_TOTAL_FEE_SATS = ESTIMATED_FEE_PER_TX_SATS * 2; // For both commit + spell transactions
+
+// Minimum fee buffer to ensure transactions go through
+// Testnet: Lower buffer (500 sats) since fees are minimal
+// Mainnet: Higher buffer (5000 sats) for safety and network fluctuations
+export const MIN_FEE_BUFFER_SATS = IS_TESTNET ? 500 : 5000;
 
 // Minimum UTXO value required (gift card amount + fees)
 export function calculateMinimumRequiredSats(giftCardAmountCents: number): number {
@@ -22,12 +29,14 @@ export function calculateMinimumRequiredSats(giftCardAmountCents: number): numbe
 
 /**
  * Calculate total cost including fees
+ * Returns breakdown of costs for display to users
  */
 export function calculateTotalCostSats(giftCardAmountCents: number): {
   giftCardSats: number;
   estimatedFeesSats: number;
   totalSats: number;
   minimumRequiredSats: number;
+  network: string;
 } {
   const giftCardSats = giftCardAmountCents * 1000;
   const estimatedFeesSats = ESTIMATED_TOTAL_FEE_SATS;
@@ -39,6 +48,7 @@ export function calculateTotalCostSats(giftCardAmountCents: number): {
     estimatedFeesSats,
     totalSats,
     minimumRequiredSats,
+    network: IS_TESTNET ? 'testnet' : 'mainnet',
   };
 }
 

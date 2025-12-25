@@ -18,9 +18,11 @@ ins:
 
 outs:
   - address: ${recipient_address}
+    sats: 1000
     charms:
       $01: ${transfer_amount}
   - address: ${sender_address}
+    sats: 1000
     charms:
       $00:
         brand: "${brand}"

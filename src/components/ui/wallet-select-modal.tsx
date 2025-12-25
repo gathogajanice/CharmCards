@@ -4,9 +4,10 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { X, Wallet, Download, CheckCircle2 } from 'lucide-react';
 import Image from 'next/image';
-import { useAppKit } from '@reown/appkit/react';
+import { useAppKit, useAppKitAccount } from '@reown/appkit/react';
 import { connectUnisatDirectly, isUnisatAvailable } from '@/lib/charms/wallet-connection';
 import { attemptNetworkSwitch, detectWalletName, getNetworkFromWallet } from '@/lib/charms/network';
+import { useRefreshWalletData } from '@/hooks/use-wallet-data';
 import { toast } from 'sonner';
 
 interface Wallet {
@@ -24,6 +25,8 @@ interface WalletSelectModalProps {
 
 export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModalProps) {
   const { open } = useAppKit();
+  const { address, isConnected } = useAppKitAccount();
+  const { refreshAll } = useRefreshWalletData();
   const [isConnecting, setIsConnecting] = useState<string | null>(null);
   const [wallets, setWallets] = useState<Wallet[]>([]);
 
@@ -252,9 +255,31 @@ export default function WalletSelectModal({ isOpen, onClose }: WalletSelectModal
       toast.warning('Please ensure your wallet is on Bitcoin Testnet4 network.');
     }
 
+    // Close modal first
     onClose();
-    // Reload to sync with AppKit
-    setTimeout(() => window.location.reload(), 1500);
+    
+    // Wait a moment for AppKit to sync, then fetch all wallet data
+    // No page reload - use React Query to fetch data smoothly
+    setTimeout(() => {
+      try {
+        // Use the address parameter passed to this function
+        // AppKit should have synced by now, but if not, React Query will retry
+        if (address) {
+          // Trigger React Query to fetch all wallet data
+          // This will automatically fetch balance, UTXOs, and Charms
+          refreshAll(address);
+          
+          console.log('✅ Triggered data fetch for wallet:', address);
+          toast.info('Loading wallet data...');
+        } else {
+          // If address not available yet, React Query hooks will auto-fetch when AppKit syncs
+          console.log('⏳ Waiting for AppKit to sync address...');
+        }
+      } catch (error) {
+        console.warn('Failed to trigger data fetch:', error);
+        // Don't show error - React Query will retry automatically when isConnected becomes true
+      }
+    }, 500);
   };
 
   return (

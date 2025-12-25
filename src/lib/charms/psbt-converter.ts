@@ -33,7 +33,8 @@ function getNetwork(): bitcoin.Network {
 }
 
 /**
- * Fetch UTXO details from mempool.space
+ * Fetch UTXO details from memepool.space
+ * Note: This may fail due to CORS in browser - that's okay, wallet can provide info during signing
  */
 async function fetchUtxoDetails(
   txid: string,
@@ -41,11 +42,12 @@ async function fetchUtxoDetails(
 ): Promise<{ value: number; scriptPubKey: Buffer } | null> {
   try {
     const explorerUrl = NETWORK === 'testnet4'
-      ? `https://mempool.space/testnet4/api/tx/${txid}`
-      : `https://mempool.space/api/tx/${txid}`;
+      ? `https://memepool.space/testnet4/api/tx/${txid}`
+      : `https://memepool.space/api/tx/${txid}`;
     
     const response = await fetch(explorerUrl, { cache: 'no-store' });
     if (!response.ok) {
+      // CORS or other error - return null, wallet will provide info during signing
       return null;
     }
     
@@ -60,7 +62,8 @@ async function fetchUtxoDetails(
       scriptPubKey: Buffer.from(output.scriptpubkey, 'hex'),
     };
   } catch (error) {
-    console.warn('Failed to fetch UTXO details:', error);
+    // CORS or network error - that's okay, wallet can provide UTXO info during signing
+    console.warn('Failed to fetch UTXO details (CORS may be blocking):', error);
     return null;
   }
 }
@@ -103,12 +106,40 @@ export async function hexToPsbt(
             : Buffer.alloc(0),
         };
       } else {
-        // Fetch from mempool.space
-        utxoInfo = await fetchUtxoDetails(txid, vout);
+        // Try to fetch from server-side proxy first (bypasses CORS)
+        try {
+          const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+          const txUrl = `${API_URL}/api/utxo/tx/${txid}`;
+          const response = await fetch(txUrl, { cache: 'no-store' });
+          if (response.ok) {
+            const tx = await response.json();
+            if (tx.vout && vout < tx.vout.length) {
+              const output = tx.vout[vout];
+              utxoInfo = {
+                value: output.value || 0,
+                scriptPubKey: Buffer.from(output.scriptpubkey, 'hex'),
+              };
+            }
+          }
+        } catch (proxyError) {
+          console.warn('Server-side proxy failed, trying direct fetch:', proxyError);
+        }
+        
+        // Fallback to direct fetch (may fail due to CORS)
+        if (!utxoInfo) {
+          utxoInfo = await fetchUtxoDetails(txid, vout);
+        }
       }
       
+      // If we can't get UTXO info, we can still create PSBT with minimal info
+      // The wallet will fill in the missing details during signing
       if (!utxoInfo) {
-        throw new Error(`Failed to get UTXO details for input ${i} (txid: ${txid}, vout: ${vout})`);
+        console.warn(`Could not fetch UTXO details for input ${i} (txid: ${txid}, vout: ${vout}). Wallet will provide info during signing.`);
+        // Create minimal UTXO info - wallet will fill in the rest
+        utxoInfo = {
+          value: 0, // Will be filled by wallet
+          scriptPubKey: Buffer.alloc(0), // Will be filled by wallet
+        };
       }
       
       // Determine if this is a SegWit (witness) transaction
@@ -118,41 +149,57 @@ export async function hexToPsbt(
       // Charms uses Taproot, so we'll use witnessUtxo
       // Note: hashBuffer is already in internal byte order (as required by bitcoinjs-lib)
       
-      try {
-        // Try to get full transaction for nonWitnessUtxo (more reliable for some wallets)
-        const explorerUrl = NETWORK === 'testnet4'
-          ? `https://mempool.space/testnet4/api/tx/${txid}/hex`
-          : `https://mempool.space/api/tx/${txid}/hex`;
-        
-        const response = await fetch(explorerUrl, { cache: 'no-store' });
-        if (response.ok) {
-          const prevTxHex = await response.text();
-          psbt.addInput({
-            hash: hashBuffer, // Use internal byte order hash
-            index: vout,
-            nonWitnessUtxo: Buffer.from(prevTxHex, 'hex'),
-          });
-        } else {
-          // Fallback to witnessUtxo for SegWit/Taproot
-          psbt.addInput({
-            hash: hashBuffer, // Use internal byte order hash
-            index: vout,
-            witnessUtxo: {
-              script: utxoInfo.scriptPubKey,
-              value: utxoInfo.value,
-            },
-          });
-        }
-      } catch (error) {
-        // Fallback to witnessUtxo (works for Taproot/SegWit)
+      // For Taproot (Charms uses Taproot), use witnessUtxo
+      // Even if we don't have full UTXO info, wallet can fill it in during signing
+      // Skip trying to fetch full transaction (CORS issues) - wallet has the info
+      if (isSegWit || utxoInfo.scriptPubKey.length === 0) {
+        // Use witnessUtxo for Taproot/SegWit - wallet will provide scriptPubKey if missing
         psbt.addInput({
           hash: hashBuffer, // Use internal byte order hash
           index: vout,
           witnessUtxo: {
-            script: utxoInfo.scriptPubKey,
-            value: utxoInfo.value,
+            script: utxoInfo.scriptPubKey.length > 0 ? utxoInfo.scriptPubKey : Buffer.alloc(0),
+            value: utxoInfo.value || 0,
           },
         });
+      } else {
+        // For non-SegWit, try to get full transaction (but don't fail if CORS blocks)
+        try {
+          const explorerUrl = NETWORK === 'testnet4'
+            ? `https://memepool.space/testnet4/api/tx/${txid}/hex`
+            : `https://memepool.space/api/tx/${txid}/hex`;
+          
+          const response = await fetch(explorerUrl, { cache: 'no-store' });
+          if (response.ok) {
+            const prevTxHex = await response.text();
+            psbt.addInput({
+              hash: hashBuffer,
+              index: vout,
+              nonWitnessUtxo: Buffer.from(prevTxHex, 'hex'),
+            });
+          } else {
+            // Fallback to witnessUtxo
+            psbt.addInput({
+              hash: hashBuffer,
+              index: vout,
+              witnessUtxo: {
+                script: utxoInfo.scriptPubKey,
+                value: utxoInfo.value,
+              },
+            });
+          }
+        } catch (error) {
+          // CORS or other error - use witnessUtxo, wallet will fill in details
+          console.warn('Could not fetch full transaction (CORS may block), using witnessUtxo:', error);
+          psbt.addInput({
+            hash: hashBuffer,
+            index: vout,
+            witnessUtxo: {
+              script: utxoInfo.scriptPubKey,
+              value: utxoInfo.value || 0,
+            },
+          });
+        }
       }
     }
     

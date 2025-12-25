@@ -49,6 +49,34 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
     setShowNetworkModal,
   } = useNetworkCheck();
 
+  // Ensure wallet authorization when connected
+  useEffect(() => {
+    const ensureAuthorization = async () => {
+      if (!address || !isConnected) {
+        return;
+      }
+
+      try {
+        // Import and call ensureWalletAuthorization to proactively authorize
+        // This prevents the "source has not been authorized yet" error
+        const { ensureWalletAuthorization } = await import('@/lib/charms/wallet');
+        await ensureWalletAuthorization();
+      } catch (error: any) {
+        // Silently suppress ALL errors - authorization errors are expected
+        // User will be prompted when they actually use the wallet
+        // Don't log or show errors - this is normal behavior
+        if (error.message?.includes('not authorized') || error.message?.includes('not been authorized')) {
+          // Expected - do nothing
+        } else {
+          // Only log unexpected errors for debugging
+          console.log('Authorization check (non-critical):', error.message || error);
+        }
+      }
+    };
+
+    ensureAuthorization();
+  }, [address, isConnected]);
+
   // Fetch wallet balance when connected
   useEffect(() => {
     const fetchBalance = async () => {
@@ -63,7 +91,29 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         setBalanceCheckError(null);
       } catch (error: any) {
         console.warn('Failed to fetch wallet balance:', error);
-        setBalanceCheckError('Unable to check balance');
+        
+        // Handle different error types with user-friendly messages
+        if (error.message?.includes('not authorized') || error.message?.includes('not been authorized')) {
+          // Authorization error - try to request it silently
+          try {
+            const { ensureWalletAuthorization } = await import('@/lib/charms/wallet');
+            await ensureWalletAuthorization();
+            // Retry balance fetch after authorization
+            const balance = await getWalletBalance(address, null);
+            setWalletBalance(balance);
+            setBalanceCheckError(null);
+          } catch (authError) {
+            // Silently ignore - user will be prompted when they use wallet
+            setBalanceCheckError(null); // Don't show error for expected authorization issues
+          }
+        } else if (error.message?.includes('Failed to fetch') || error.message?.includes('NetworkError')) {
+          setBalanceCheckError('Cannot connect to wallet. Please ensure your wallet is unlocked and try again.');
+        } else if (error.message?.includes('API server')) {
+          setBalanceCheckError('API server error. Please ensure the API server is running on port 3001.');
+        } else {
+          // Generic error - show message but don't block user
+          setBalanceCheckError('Unable to check balance. You can still proceed with minting.');
+        }
       }
     };
 
@@ -145,49 +195,56 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       }
 
       // Step 2: Try to get UTXO for spell creation (but don't fail if unavailable)
+      // We prioritize wallet's own UTXO methods, which don't have CORS issues
       let inUtxo: string | null = null;
       let utxos: Array<{ txid: string; vout: number; value: number }> = [];
       
-      // Try to fetch UTXOs - but be lenient
+      // Try to fetch UTXOs from wallet (no CORS issues)
       try {
         utxos = await getWalletUtxos(address, null);
         if (utxos.length > 0) {
-          console.log(`Found ${utxos.length} UTXOs, using first one: ${utxos[0].txid}:${utxos[0].vout}`);
+          console.log(`Found ${utxos.length} UTXOs from wallet, using first one: ${utxos[0].txid}:${utxos[0].vout}`);
           inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
         } else {
-          console.warn('No UTXOs found from wallet or mempool, but balance exists. Proceeding with balance check only.');
-          // If we have balance but no UTXOs, we can still try - the Prover API might handle it
-          // Or we can construct a dummy UTXO that will be resolved during PSBT creation
-          toast.info('UTXOs not yet indexed, but balance confirmed. Proceeding with transaction...');
+          console.warn('No UTXOs found from wallet, but balance exists. Will try wallet methods again during PSBT conversion.');
+          // We'll proceed anyway - the PSBT converter will try wallet methods again
+          // and the wallet should be able to provide UTXO info during signing
         }
-      } catch (utxoError) {
-        console.warn('UTXO fetch failed, but balance exists. Proceeding:', utxoError);
-        toast.info('Proceeding with transaction (UTXOs will be resolved during signing)...');
+      } catch (utxoError: any) {
+        console.warn('UTXO fetch from wallet failed, but balance exists. Proceeding:', utxoError);
+        // Don't fail here - we have balance, so we can proceed
+        // The wallet should be able to provide UTXO info when signing
       }
 
       // Step 3: Create spell and generate proof
       setTxStatus('generating-proof');
       toast.info('Creating spell and generating proof...');
       
-      // If we don't have a UTXO, we need to provide one for the API
-      // The API requires an inUtxo, so we'll need to get one or construct it
+      // If we don't have a UTXO yet, we need one for the Prover API
+      // Try wallet methods one more time with a short delay
       if (!inUtxo) {
-        // Try one more time with a longer wait
-        console.log('Retrying UTXO fetch with longer wait...');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        utxos = await getWalletUtxos(address, null);
-        if (utxos.length > 0) {
-          inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
-        } else {
-          // Last resort: we can't proceed without a UTXO for the API
-          setTxStatus('error');
-          const errorMsg = 'Unable to fetch UTXOs. Please wait a few moments for the network to sync, then try again.';
-          setTxError(errorMsg);
-          toast.error(errorMsg);
-          toast.info('Your wallet shows a balance, but UTXOs need to be indexed. This usually takes 1-2 minutes after receiving funds.');
-          setIsMinting(false);
-          return;
+        console.log('No UTXO yet, retrying wallet methods...');
+        try {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          utxos = await getWalletUtxos(address, null);
+          if (utxos.length > 0) {
+            inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
+            console.log(`Got UTXO on retry: ${inUtxo}`);
+          }
+        } catch (retryError) {
+          console.warn('Retry also failed:', retryError);
         }
+      }
+      
+      // If we still don't have a UTXO, we can't proceed - the Prover API requires it
+      if (!inUtxo) {
+        setTxStatus('error');
+        const errorMsg = 'Unable to fetch UTXOs from wallet. This may be due to:\n1. Wallet not fully synced\n2. Recent transaction not yet confirmed\n3. Wallet API limitations\n\nPlease try:\n- Wait 1-2 minutes for network sync\n- Refresh the page and reconnect wallet\n- Ensure you have confirmed transactions';
+        setTxError(errorMsg);
+        toast.error('Unable to fetch UTXOs from wallet');
+        toast.info('Your wallet shows a balance, but UTXO information is needed. Please wait for network sync or try reconnecting your wallet.');
+        setIsMinting(false);
+        return;
       }
 
       const { spell, proof } = await mintGiftCard({
@@ -201,11 +258,28 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
 
       toast.success('Spell created! Proof generated. Please approve the transaction in your wallet...');
       
-      // Step 4: Sign transactions (THIS TRIGGERS WALLET POPUP)
+      // Step 4: Sign transactions (THIS IS WHERE WALLET POPUP SHOULD APPEAR)
+      // The wallet popup will appear when signSpellTransactions is called below
+      // This happens during the "Signing Transactions" / "Authorizing with your wallet" stage
       if (proof.commit_tx && proof.spell_tx) {
         try {
           setTxStatus('signing');
-          toast.info('🔄 Please approve the transaction in your wallet popup...');
+          
+          // Detect which wallet is connected for better user messaging
+          let walletName = 'your wallet';
+          try {
+            const { detectConnectedWallet } = await import('@/lib/charms/network');
+            const detected = await detectConnectedWallet();
+            if (detected) {
+              walletName = detected.charAt(0).toUpperCase() + detected.slice(1);
+            }
+          } catch (e) {
+            console.warn('Could not detect wallet name:', e);
+          }
+          
+          toast.info(`🔄 Opening ${walletName} popup... Please approve the transaction in your wallet.`);
+          console.log('🔐 About to sign transactions - wallet popup should appear now...');
+          console.log(`📱 Detected wallet: ${walletName}`);
           
           // Sign transactions - this will convert hex to PSBT and trigger wallet popup
           const { commitTx: signedCommitTx, spellTx: signedSpellTx } = await signSpellTransactions(
@@ -242,7 +316,7 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           toast.success(`Spell TX: ${spellTxid.substring(0, 16)}...`);
           
           // Open explorer links
-          const explorerBase = 'https://mempool.space/testnet4/tx/';
+          const explorerBase = 'https://memepool.space/testnet4/tx/';
           console.log(`\n✅ Transactions broadcast successfully!`);
           console.log(`Commit TX: ${explorerBase}${commitTxid}`);
           console.log(`Spell TX: ${explorerBase}${spellTxid}`);
@@ -423,7 +497,12 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
                   </div>
                   <div className="flex justify-between text-foreground/80">
                     <span>Estimated Network Fees:</span>
-                    <span className="font-medium">{formatSats(costBreakdown.estimatedFeesSats)}</span>
+                    <span className="font-medium">
+                      {formatSats(costBreakdown.estimatedFeesSats)}
+                      {costBreakdown.network === 'testnet' && (
+                        <span className="text-[10px] text-green-600 ml-1 font-normal">(affordable)</span>
+                      )}
+                    </span>
                   </div>
                   <div className="pt-2 border-t border-border flex justify-between text-foreground font-semibold">
                     <span>Total Required:</span>

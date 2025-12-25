@@ -12,6 +12,7 @@ ins:
 
 outs:
   - address: ${addr_0}
+    sats: 1000
     charms:
       $00:
         ticker: GIFT-CARDS

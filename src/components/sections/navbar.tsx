@@ -12,7 +12,7 @@ import TestnetFaucet from '@/components/ui/testnet-faucet';
 import WalletSelectModal from '@/components/ui/wallet-select-modal';
 import { attemptNetworkSwitch, detectWalletName, getNetworkFromWallet } from '@/lib/charms/network';
 import { getWalletBalance } from '@/lib/charms/wallet';
-import { formatBalance } from '@/lib/utils/balance';
+import { formatBalance, formatSatsCompact } from '@/lib/utils/balance';
 
 // Component to show connected wallet name
 function ConnectedWalletName() {
@@ -175,9 +175,16 @@ export default function Navbar() {
                 >
                   <Bitcoin size={14} />
                   <span className="font-bold">
-                    {isLoadingBalance ? '...' : formatBalance(balance)}
+                    {isLoadingBalance ? '...' : (
+                      <>
+                        {formatBalance(balance)} <span className="text-[10px] opacity-70">BTC</span>
+                        <span className="text-[10px] opacity-60 mx-1">•</span>
+                        <span className="text-[10px] opacity-70 font-normal">
+                          {formatSatsCompact(balance ? balance * 100_000_000 : 0)}
+                        </span>
+                      </>
+                    )}
                   </span>
-                  <span className="text-[10px] opacity-70">BTC</span>
                 </motion.div>
               )}
 
@@ -335,8 +342,17 @@ export default function Navbar() {
                 {isConnected && balance !== null && (
                   <div className="flex items-center justify-center h-12 rounded-xl border border-[#2A9DFF]/20 bg-[#2A9DFF]/10 text-[#2A9DFF] text-[14px] font-semibold gap-2">
                     <Bitcoin size={16} />
-                    <span className="font-bold">{isLoadingBalance ? '...' : formatBalance(balance)}</span>
-                    <span className="text-[12px] opacity-70">BTC</span>
+                    <span className="font-bold">
+                      {isLoadingBalance ? '...' : (
+                        <>
+                          {formatBalance(balance)} <span className="text-[12px] opacity-70">BTC</span>
+                          <span className="text-[10px] opacity-50 mx-1">•</span>
+                          <span className="text-[12px] opacity-70 font-normal">
+                            {formatSatsCompact(balance ? balance * 100_000_000 : 0)}
+                          </span>
+                        </>
+                      )}
+                    </span>
                   </div>
                 )}
 
