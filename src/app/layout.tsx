@@ -3,6 +3,8 @@ import { Bricolage_Grotesque } from "next/font/google";
 import "./globals.css";
 import { CartProvider } from "@/context/CartContext";
 import Web3Provider from "@/context/Web3Provider";
+import { WalletErrorHandler } from "@/components/wallet-error-handler";
+import { WalletAuthorizationProvider } from "@/components/wallet-authorization-provider";
 
 const bricolage = Bricolage_Grotesque({ 
   subsets: ['latin'],
@@ -27,11 +29,14 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${bricolage.variable} font-sans antialiased`}>
-        <Web3Provider>
-          <CartProvider>
-            {children}
-          </CartProvider>
-        </Web3Provider>
+        <WalletErrorHandler />
+        <WalletAuthorizationProvider>
+          <Web3Provider>
+            <CartProvider>
+              {children}
+            </CartProvider>
+          </Web3Provider>
+        </WalletAuthorizationProvider>
       </body>
     </html>
   );

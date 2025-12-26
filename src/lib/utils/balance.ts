@@ -68,3 +68,61 @@ export function formatSatsCompact(sats: number | null | undefined): string {
   return `${satsInt} sats`;
 }
 
+/**
+ * Format balance with sats as primary, BTC as secondary
+ * Example: "188,903 sats (0.00188903 BTC)"
+ * This is the preferred format since Charms transactions work with sats
+ */
+export function formatBalanceSatsPrimary(btc: number | null | undefined): string {
+  if (btc === null || btc === undefined || isNaN(btc) || !isFinite(btc)) {
+    return '0 sats (0.00000000 BTC)';
+  }
+  
+  if (btc === 0) {
+    return '0 sats (0.00000000 BTC)';
+  }
+  
+  // Convert BTC to sats
+  const sats = Math.floor(btc * 100_000_000);
+  
+  // Format sats with commas for readability
+  const satsFormatted = sats.toLocaleString('en-US');
+  
+  // Format BTC with 8 decimal places (standard Bitcoin precision)
+  const btcFormatted = btc.toFixed(8);
+  
+  return `${satsFormatted} sats (${btcFormatted} BTC)`;
+}
+
+/**
+ * Format balance showing only sats (no BTC)
+ * Example: "188,903 sats" or "1.5M sats"
+ * Used in navbar and faucet for cleaner display
+ */
+export function formatBalanceSatsOnly(btc: number | null | undefined): string {
+  if (btc === null || btc === undefined || isNaN(btc) || !isFinite(btc)) {
+    return '0 sats';
+  }
+  
+  if (btc === 0) {
+    return '0 sats';
+  }
+  
+  // Convert BTC to sats
+  const sats = Math.floor(btc * 100_000_000);
+  
+  // Use compact format for large numbers, full format with commas for smaller numbers
+  if (sats >= 1_000_000) {
+    const millions = sats / 1_000_000;
+    return `${millions.toFixed(2).replace(/\.?0+$/, '')}M sats`;
+  }
+  
+  if (sats >= 1_000) {
+    const thousands = sats / 1_000;
+    return `${thousands.toFixed(1).replace(/\.?0+$/, '')}k sats`;
+  }
+  
+  // For amounts less than 1000, show with commas if needed
+  return `${sats.toLocaleString('en-US')} sats`;
+}
+

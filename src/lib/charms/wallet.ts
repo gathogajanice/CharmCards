@@ -148,12 +148,20 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
     }
 
     // Also check localStorage for recently minted cards that might not be in UTXOs yet
+    // Extended duration: show cards from localStorage until blockchain confirms (or permanently if appId matches)
     try {
       const txHistory = JSON.parse(localStorage.getItem('charmCardsTxHistory') || '[]');
       const recentMints = txHistory
-        .filter((h: any) => h.type === 'mint' && Date.now() - h.timestamp < 300000) // Last 5 minutes
+        .filter((h: any) => {
+          if (h.type !== 'mint') return false;
+          // Show if minted in last 24 hours OR if we have appId and it doesn't match any existing NFT
+          const isRecent = Date.now() - h.timestamp < 24 * 60 * 60 * 1000; // Last 24 hours
+          const hasAppId = h.appId && !nfts.find(n => n.app_id === h.appId);
+          return isRecent || hasAppId;
+        })
         .map((h: any) => {
-          const appId = h.spellTxid?.substring(0, 16) || h.commitTxid?.substring(0, 16) || 'unknown';
+          // Use appId from storage if available, otherwise generate from txid
+          const appId = h.appId || h.spellTxid?.substring(0, 32) || h.commitTxid?.substring(0, 32) || 'unknown';
           const brand = h.brand || 'Unknown';
           return {
             type: 'nft' as const,
@@ -162,15 +170,18 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
             data: {
               brand,
               image: h.image || getGiftCardImage(brand),
-              initial_amount: Math.floor((h.amount || 0) * 100),
-              remaining_balance: Math.floor((h.amount || 0) * 100),
-              expiration_date: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60,
-              created_at: Math.floor(h.timestamp / 1000),
+              initial_amount: h.initialAmount || Math.floor((h.amount || 0) * 100),
+              remaining_balance: h.initialAmount || Math.floor((h.amount || 0) * 100),
+              expiration_date: h.expirationDate || Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60,
+              created_at: h.createdAt || Math.floor(h.timestamp / 1000),
             },
+            // Store transaction IDs for reference
+            commitTxid: h.commitTxid,
+            spellTxid: h.spellTxid,
           };
         });
       
-      // Merge with existing NFTs, avoiding duplicates
+      // Merge with existing NFTs, avoiding duplicates by app_id
       for (const mint of recentMints) {
         if (!nfts.find(n => n.app_id === mint.app_id)) {
           nfts.push(mint);
@@ -256,98 +267,143 @@ async function tryExtractGiftCardFromUtxo(
  * Ensure wallet is authorized for the current origin
  * This explicitly requests authorization if not already granted
  * Exported so components can proactively check authorization on page load
+ * 
+ * Improved version that:
+ * - Checks all wallets, not just the first one found
+ * - Handles cases where extensions exist but aren't authorized yet
+ * - Better error handling for edge cases
+ * - Prevents "source has not been authorized yet" errors
  */
 export async function ensureWalletAuthorization(): Promise<void> {
   if (typeof window === 'undefined') return;
 
+  const authorizationPromises: Promise<void>[] = [];
+
+  // Helper to check if error indicates authorization is needed
+  const needsAuthorization = (error: any): boolean => {
+    if (!error) return false;
+    const message = error.message || error.toString() || '';
+    return (
+      message.includes('not authorized') ||
+      message.includes('not been authorized') ||
+      message.includes('not connected') ||
+      error.code === 4001 || // User rejected
+      error.code === -32002 // Request already pending
+    );
+  };
+
+  // Check and request authorization for Unisat
+  if ((window as any).unisat) {
+    const unisat = (window as any).unisat;
+    authorizationPromises.push(
+      (async () => {
+        try {
+          // Try to get accounts - if this succeeds, wallet is already authorized
+          const accounts = await unisat.getAccounts();
+          if (accounts && accounts.length > 0) {
+            // Wallet is authorized and has accounts
+            return;
+          }
+        } catch (e: any) {
+          // If getAccounts fails, check if it's an authorization error
+          if (needsAuthorization(e)) {
+            try {
+              // Request authorization - this may trigger popup if user hasn't authorized
+              // Note: This is non-blocking and won't show popup unless user interacts
+              await unisat.requestAccounts();
+            } catch (requestError: any) {
+              // Silently handle - user may not have authorized yet, which is fine
+              // The important thing is we've attempted authorization
+              if (!needsAuthorization(requestError)) {
+                console.debug('Unisat authorization check:', requestError.message || 'Unknown error');
+              }
+            }
+          }
+        }
+      })()
+    );
+  }
+
+  // Check and request authorization for Xverse
+  const xverse = (window as any).XverseProviders?.BitcoinProvider || 
+                 (window as any).XverseProviders ||
+                 (window as any).xverse;
+  if (xverse) {
+    authorizationPromises.push(
+      (async () => {
+        try {
+          if (typeof xverse.getAccounts === 'function') {
+            const accounts = await xverse.getAccounts();
+            if (accounts && accounts.length > 0) {
+              // Wallet is authorized
+              return;
+            }
+          }
+        } catch (e: any) {
+          if (needsAuthorization(e)) {
+            try {
+              // Try different methods to request authorization
+              if (typeof xverse.request === 'function') {
+                await xverse.request('getAccounts', {});
+              } else if (typeof xverse.requestAccounts === 'function') {
+                await xverse.requestAccounts();
+              } else if (typeof xverse.getAccounts === 'function') {
+                // Last resort - try getAccounts again
+                await xverse.getAccounts();
+              }
+            } catch (requestError: any) {
+              if (!needsAuthorization(requestError)) {
+                console.debug('Xverse authorization check:', requestError.message || 'Unknown error');
+              }
+            }
+          }
+        }
+      })()
+    );
+  }
+
+  // Check and request authorization for Leather
+  const leather = (window as any).btc || (window as any).hiroWalletProvider;
+  if (leather) {
+    authorizationPromises.push(
+      (async () => {
+        try {
+          if (typeof leather.getAccounts === 'function') {
+            const accounts = await leather.getAccounts();
+            if (accounts && accounts.length > 0) {
+              // Wallet is authorized
+              return;
+            }
+          }
+        } catch (e: any) {
+          if (needsAuthorization(e)) {
+            try {
+              // Try different methods to request authorization
+              if (typeof leather.request === 'function') {
+                await leather.request('getAccounts', {});
+              } else if (typeof leather.requestAccounts === 'function') {
+                await leather.requestAccounts();
+              } else if (typeof leather.getAccounts === 'function') {
+                await leather.getAccounts();
+              }
+            } catch (requestError: any) {
+              if (!needsAuthorization(requestError)) {
+                console.debug('Leather authorization check:', requestError.message || 'Unknown error');
+              }
+            }
+          }
+        }
+      })()
+    );
+  }
+
+  // Execute all authorization checks in parallel
+  // Don't throw errors - authorization failures are expected if user hasn't connected
   try {
-    // Check and request authorization for Unisat
-    if ((window as any).unisat) {
-      const unisat = (window as any).unisat;
-      try {
-        // Try to get accounts - if this succeeds, wallet is already authorized
-        const accounts = await unisat.getAccounts();
-        if (accounts && accounts.length > 0) {
-          // Wallet is authorized and has accounts
-          return;
-        }
-      } catch (e: any) {
-        // If getAccounts fails, we need to request authorization
-        // This will trigger the wallet popup
-        try {
-          console.log('🔐 Requesting Unisat authorization for this origin...');
-          await unisat.requestAccounts();
-          console.log('✅ Unisat authorization requested');
-        } catch (requestError: any) {
-          // If requestAccounts also fails, log it but don't throw
-          // The error might be that user rejected, or wallet needs user interaction
-          console.log('ℹ️ Unisat authorization request:', requestError.message || 'User may need to approve in wallet');
-        }
-      }
-    }
-
-    // Check and request authorization for Xverse
-    const xverse = (window as any).XverseProviders?.BitcoinProvider || 
-                   (window as any).XverseProviders ||
-                   (window as any).xverse;
-    if (xverse) {
-      try {
-        if (typeof xverse.getAccounts === 'function') {
-          const accounts = await xverse.getAccounts();
-          if (accounts && accounts.length > 0) {
-            // Wallet is authorized
-            return;
-          }
-        }
-      } catch (e: any) {
-        // If getAccounts fails, request authorization explicitly
-        try {
-          console.log('🔐 Requesting Xverse authorization for this origin...');
-          if (typeof xverse.request === 'function') {
-            await xverse.request('getAccounts', {});
-          } else if (typeof xverse.requestAccounts === 'function') {
-            await xverse.requestAccounts();
-          } else if (typeof xverse.getAccounts === 'function') {
-            await xverse.getAccounts();
-          }
-          console.log('✅ Xverse authorization requested');
-        } catch (requestError: any) {
-          console.log('ℹ️ Xverse authorization request:', requestError.message || 'User may need to approve in wallet');
-        }
-      }
-    }
-
-    // Check and request authorization for Leather
-    const leather = (window as any).btc || (window as any).hiroWalletProvider;
-    if (leather) {
-      try {
-        if (typeof leather.getAccounts === 'function') {
-          const accounts = await leather.getAccounts();
-          if (accounts && accounts.length > 0) {
-            // Wallet is authorized
-            return;
-          }
-        }
-      } catch (e: any) {
-        // If getAccounts fails, request authorization explicitly
-        try {
-          console.log('🔐 Requesting Leather authorization for this origin...');
-          if (typeof leather.request === 'function') {
-            await leather.request('getAccounts', {});
-          } else if (typeof leather.requestAccounts === 'function') {
-            await leather.requestAccounts();
-          } else if (typeof leather.getAccounts === 'function') {
-            await leather.getAccounts();
-          }
-          console.log('✅ Leather authorization requested');
-        } catch (requestError: any) {
-          console.log('ℹ️ Leather authorization request:', requestError.message || 'User may need to approve in wallet');
-        }
-      }
-    }
+    await Promise.allSettled(authorizationPromises);
   } catch (error) {
-    console.warn('Authorization check failed (may already be authorized):', error);
-    // Don't throw - authorization might already be granted
+    // This should rarely happen, but if it does, it's not critical
+    console.debug('Wallet authorization check completed with some errors (this is normal)');
   }
 }
 
@@ -975,19 +1031,94 @@ export async function getWalletBalance(
     if ((window as any).unisat && typeof (window as any).unisat.getBalance === 'function') {
       try {
         const balance = await (window as any).unisat.getBalance();
-        console.log('Balance from Unisat wallet:', balance);
-        // Unisat returns balance in BTC format
+        console.log('🔍 Unisat Raw Balance Response:', {
+          raw: balance,
+          type: typeof balance,
+          isObject: typeof balance === 'object' && balance !== null,
+        });
+        
+        let balanceValue: number | null = null;
+        
         if (typeof balance === 'number') {
-          return balance;
+          balanceValue = balance;
+        } else if (typeof balance === 'string') {
+          balanceValue = parseFloat(balance);
+        } else if (balance && typeof balance.total === 'number') {
+          balanceValue = balance.total;
+        } else if (balance && typeof balance.confirmed === 'number') {
+          balanceValue = balance.confirmed;
         }
-        if (typeof balance === 'string') {
-          return parseFloat(balance);
-        }
-        if (balance && typeof balance.total === 'number') {
-          return balance.total;
-        }
-        if (balance && typeof balance.confirmed === 'number') {
-          return balance.confirmed;
+        
+        if (balanceValue !== null && !isNaN(balanceValue)) {
+          console.log('🔍 Unisat Balance Detection:', {
+            rawValue: balanceValue,
+            possibleUnits: {
+              asBTC: balanceValue,
+              asSats: balanceValue,
+            },
+          });
+          
+          // Improved detection logic:
+          // 1. If value is > 21,000,000, it's definitely in sats (max BTC supply)
+          // 2. If value is between 1 and 21,000,000, check context:
+          //    - Testnet: Usually small amounts (< 1 BTC), so > 1 likely means sats
+          //    - Mainnet: Could be either, but > 1 is more likely BTC for larger wallets
+          // 3. If value is <= 1, it's likely BTC (testnet balances are usually < 1 BTC)
+          // 4. If value is >= 100,000,000, it's definitely in sats (1 BTC = 100M sats)
+          
+          const isTestnet = NETWORK === 'testnet4' || NETWORK === 'testnet';
+          let detectedUnit: 'BTC' | 'sats' | 'unknown' = 'unknown';
+          let finalBalance: number = balanceValue;
+          
+          if (balanceValue >= 100_000_000) {
+            // Definitely in sats (>= 1 BTC worth of sats)
+            detectedUnit = 'sats';
+            finalBalance = balanceValue / 100_000_000;
+            console.log('🔄 Unisat: Detected as SATS (>= 100M), converting to BTC');
+          } else if (balanceValue > 21_000_000) {
+            // Definitely in sats (exceeds max BTC supply)
+            detectedUnit = 'sats';
+            finalBalance = balanceValue / 100_000_000;
+            console.log('🔄 Unisat: Detected as SATS (> 21M), converting to BTC');
+          } else if (balanceValue > 1 && balanceValue <= 21_000_000) {
+            // Ambiguous range - use heuristics
+            if (isTestnet) {
+              // Testnet: Usually small amounts, so > 1 likely means sats
+              detectedUnit = 'sats';
+              finalBalance = balanceValue / 100_000_000;
+              console.log('🔄 Unisat: Testnet detected, treating as SATS (converting to BTC)');
+            } else {
+              // Mainnet: Could be either, but for values > 1 and < 21M, 
+              // if it's a round number or > 10, more likely BTC
+              // Otherwise, more likely sats
+              if (balanceValue > 10 && balanceValue % 1 === 0) {
+                // Round number > 10, could be BTC
+                detectedUnit = 'BTC';
+                finalBalance = balanceValue;
+                console.log('✅ Unisat: Mainnet, treating as BTC (round number > 10)');
+              } else {
+                // More likely sats
+                detectedUnit = 'sats';
+                finalBalance = balanceValue / 100_000_000;
+                console.log('🔄 Unisat: Mainnet, treating as SATS (converting to BTC)');
+              }
+            }
+          } else {
+            // <= 1, assume BTC
+            detectedUnit = 'BTC';
+            finalBalance = balanceValue;
+            console.log('✅ Unisat: Treating as BTC (value <= 1)');
+          }
+          
+          console.log('💰 Unisat Balance Final:', {
+            original: balanceValue,
+            detectedUnit,
+            finalBTC: finalBalance,
+            finalSats: Math.floor(finalBalance * 100_000_000),
+            network: isTestnet ? 'testnet' : 'mainnet',
+          });
+          
+          return finalBalance;
         }
       } catch (error: any) {
         // Silently handle Unisat errors - they're expected if wallet isn't authorized yet
@@ -1007,19 +1138,45 @@ export async function getWalletBalance(
       if (typeof xverse.getBalance === 'function') {
         try {
           const balance = await xverse.getBalance();
-          console.log('Balance from Xverse wallet:', balance);
+          console.log('🔍 Xverse Raw Balance Response:', {
+            raw: balance,
+            type: typeof balance,
+          });
+          
+          let balanceValue: number | null = null;
+          
           if (typeof balance === 'number') {
-            return balance;
+            balanceValue = balance;
+          } else if (typeof balance === 'string') {
+            balanceValue = parseFloat(balance);
+          } else if (balance && typeof balance.total === 'number') {
+            balanceValue = balance.total;
+          } else if (balance && typeof balance.confirmed === 'number') {
+            balanceValue = balance.confirmed;
           }
-          if (typeof balance === 'string') {
-            return parseFloat(balance);
-          }
-          // Xverse might return object with total/confirmed
-          if (balance && typeof balance.total === 'number') {
-            return balance.total;
-          }
-          if (balance && typeof balance.confirmed === 'number') {
-            return balance.confirmed;
+          
+          if (balanceValue !== null && !isNaN(balanceValue)) {
+            const isTestnet = NETWORK === 'testnet4' || NETWORK === 'testnet';
+            let finalBalance: number = balanceValue;
+            
+            // Apply same detection logic as Unisat
+            if (balanceValue >= 100_000_000 || balanceValue > 21_000_000) {
+              finalBalance = balanceValue / 100_000_000;
+              console.log('🔄 Xverse: Converting from sats to BTC');
+            } else if (balanceValue > 1 && isTestnet) {
+              finalBalance = balanceValue / 100_000_000;
+              console.log('🔄 Xverse: Testnet, converting from sats to BTC');
+            } else {
+              console.log('✅ Xverse: Treating as BTC');
+            }
+            
+            console.log('💰 Xverse Balance Final:', {
+              original: balanceValue,
+              finalBTC: finalBalance,
+              finalSats: Math.floor(finalBalance * 100_000_000),
+            });
+            
+            return finalBalance;
           }
         } catch (error) {
           console.warn('Failed to get balance from Xverse:', error);
@@ -1047,19 +1204,45 @@ export async function getWalletBalance(
     if (leather && typeof leather.getBalance === 'function') {
       try {
         const balance = await leather.getBalance();
-        console.log('Balance from Leather wallet:', balance);
+        console.log('🔍 Leather Raw Balance Response:', {
+          raw: balance,
+          type: typeof balance,
+        });
+        
+        let balanceValue: number | null = null;
+        
         if (typeof balance === 'number') {
-          return balance;
+          balanceValue = balance;
+        } else if (typeof balance === 'string') {
+          balanceValue = parseFloat(balance);
+        } else if (balance && typeof balance.total === 'number') {
+          balanceValue = balance.total;
+        } else if (balance && typeof balance.confirmed === 'number') {
+          balanceValue = balance.confirmed;
         }
-        if (typeof balance === 'string') {
-          return parseFloat(balance);
-        }
-        // Leather might return object with total/confirmed
-        if (balance && typeof balance.total === 'number') {
-          return balance.total;
-        }
-        if (balance && typeof balance.confirmed === 'number') {
-          return balance.confirmed;
+        
+        if (balanceValue !== null && !isNaN(balanceValue)) {
+          const isTestnet = NETWORK === 'testnet4' || NETWORK === 'testnet';
+          let finalBalance: number = balanceValue;
+          
+          // Apply same detection logic as Unisat
+          if (balanceValue >= 100_000_000 || balanceValue > 21_000_000) {
+            finalBalance = balanceValue / 100_000_000;
+            console.log('🔄 Leather: Converting from sats to BTC');
+          } else if (balanceValue > 1 && isTestnet) {
+            finalBalance = balanceValue / 100_000_000;
+            console.log('🔄 Leather: Testnet, converting from sats to BTC');
+          } else {
+            console.log('✅ Leather: Treating as BTC');
+          }
+          
+          console.log('💰 Leather Balance Final:', {
+            original: balanceValue,
+            finalBTC: finalBalance,
+            finalSats: Math.floor(finalBalance * 100_000_000),
+          });
+          
+          return finalBalance;
         }
       } catch (error) {
         console.warn('Failed to get balance from Leather:', error);

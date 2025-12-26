@@ -14,8 +14,9 @@ export const ESTIMATED_FEE_PER_TX_SATS = IS_TESTNET ? 250 : 1000; // Testnet: 25
 export const ESTIMATED_TOTAL_FEE_SATS = ESTIMATED_FEE_PER_TX_SATS * 2; // For both commit + spell transactions
 
 // Minimum fee buffer to ensure transactions go through
-// Testnet: Lower buffer (500 sats) since fees are minimal
+// Testnet: Lower buffer (500 sats) since fees are minimal and testnet coins have no value
 // Mainnet: Higher buffer (5000 sats) for safety and network fluctuations
+// Note: This buffer is conservative to ensure transactions succeed even with fee fluctuations
 export const MIN_FEE_BUFFER_SATS = IS_TESTNET ? 500 : 5000;
 
 // Minimum UTXO value required (gift card amount + fees)
@@ -24,7 +25,23 @@ export function calculateMinimumRequiredSats(giftCardAmountCents: number): numbe
   // More accurately: 1 BTC = 100,000,000 sats, so 1 USD ≈ 100,000 sats at $1/BTC (testnet)
   // For testnet, we'll use a simpler conversion: 1 cent = 1000 sats (conservative)
   const giftCardAmountSats = giftCardAmountCents * 1000;
-  return giftCardAmountSats + MIN_FEE_BUFFER_SATS + ESTIMATED_TOTAL_FEE_SATS;
+  
+  // Calculate total required: gift card amount + transaction fees + safety buffer
+  const totalRequired = giftCardAmountSats + MIN_FEE_BUFFER_SATS + ESTIMATED_TOTAL_FEE_SATS;
+  
+  // Log fee breakdown for debugging (only in development)
+  if (process.env.NODE_ENV === 'development') {
+    console.log('💸 Fee Calculation Breakdown:', {
+      giftCardAmountCents,
+      giftCardAmountSats,
+      estimatedFeesSats: ESTIMATED_TOTAL_FEE_SATS,
+      feeBufferSats: MIN_FEE_BUFFER_SATS,
+      totalRequiredSats: totalRequired,
+      network: IS_TESTNET ? 'testnet' : 'mainnet',
+    });
+  }
+  
+  return totalRequired;
 }
 
 /**

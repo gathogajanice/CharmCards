@@ -21,7 +21,30 @@ export function useNetworkCheck() {
   const [currentNetwork, setCurrentNetwork] = useState<string>('unknown');
   const [isChecking, setIsChecking] = useState(false);
   const [hasChecked, setHasChecked] = useState(false);
-  const [dismissedUntil, setDismissedUntil] = useState<number | null>(null);
+  
+  // Initialize from localStorage synchronously to avoid race conditions
+  const getInitialDismissedUntil = (): number | null => {
+    if (typeof window === 'undefined') return null;
+    const stored = localStorage.getItem('networkModalDismissedUntil');
+    if (stored) {
+      const dismissedUntilTime = parseInt(stored, 10);
+      if (dismissedUntilTime > Date.now()) {
+        return dismissedUntilTime;
+      } else {
+        localStorage.removeItem('networkModalDismissedUntil');
+      }
+    }
+    return null;
+  };
+  
+  const getInitialVerifiedCorrect = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    const stored = localStorage.getItem('networkVerifiedCorrect');
+    return stored === 'true';
+  };
+  
+  const [dismissedUntil, setDismissedUntil] = useState<number | null>(getInitialDismissedUntil);
+  const [lastVerifiedCorrect, setLastVerifiedCorrect] = useState<boolean>(getInitialVerifiedCorrect);
 
   // Detect network from address and wallet
   useEffect(() => {
@@ -40,47 +63,64 @@ export function useNetworkCheck() {
           console.log('Network detected from address:', network, address);
         }
         
-        // Only update if network actually changed
-        setCurrentNetwork(prev => {
-          if (prev !== network) {
-            console.log('Network changed from', prev, 'to', network);
-            return network;
-          }
-          return prev;
-        });
-        
-        // Show modal if not on required network
-        // Don't show modal if network is 'unknown' (might be still detecting)
         // IMPORTANT: If wallet reports 'testnet' but we need 'testnet4', 
         // Unisat's 'testnet' IS actually testnet4, so we should accept it
         const isOnCorrectNetwork = network === REQUIRED_NETWORK || 
                                    (network === 'testnet' && REQUIRED_NETWORK === 'testnet4');
         
+        // Check if network actually changed from previous value
+        const prevNetwork = currentNetwork;
+        const networkChanged = prevNetwork !== network && prevNetwork !== 'unknown';
+        
+        // Update current network
+        if (prevNetwork !== network) {
+          console.log('Network changed from', prevNetwork, 'to', network);
+          setCurrentNetwork(network);
+        }
+        
         if (isOnCorrectNetwork) {
           console.log('Network is correct:', network);
+          // Mark as verified and store in localStorage
+          setLastVerifiedCorrect(true);
           setShowNetworkModal(false);
-          setHasChecked(false); // Reset so we can check again if network changes
-          setDismissedUntil(null); // Clear dismissal when network is correct
+          setHasChecked(true);
+          setDismissedUntil(null);
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('networkVerifiedCorrect', 'true');
+            localStorage.removeItem('networkModalDismissedUntil');
+          }
         } else if (!isOnCorrectNetwork && network !== 'unknown') {
-          // Check if user dismissed the modal recently (within last 5 minutes)
+          // Only show modal if:
+          // 1. We haven't verified they're on correct network yet (first time check), OR
+          // 2. Network changed from correct to incorrect (they switched networks), OR
+          // 3. Modal hasn't been dismissed recently
           const now = Date.now();
           const wasDismissed = dismissedUntil && now < dismissedUntil;
           
-          if (!wasDismissed) {
+          // Show modal if:
+          // - Network changed from correct to incorrect (they switched away)
+          // - OR we haven't verified correct yet AND not dismissed
+          const shouldShow = (networkChanged && lastVerifiedCorrect) || (!lastVerifiedCorrect && !wasDismissed);
+          
+          if (shouldShow && !wasDismissed) {
             console.log('Network mismatch detected. Current:', network, 'Required:', REQUIRED_NETWORK);
-            // Only show modal if it hasn't been dismissed recently
             setShowNetworkModal(true);
+            setLastVerifiedCorrect(false);
+            if (typeof window !== 'undefined') {
+              localStorage.setItem('networkVerifiedCorrect', 'false');
+            }
             if (!hasChecked) {
               setHasChecked(true);
             }
           } else {
-            // Modal was dismissed, don't show it again yet
+            // Don't show modal - either already verified correct or dismissed
             setShowNetworkModal(false);
           }
         }
       } else {
         setCurrentNetwork('unknown');
         setShowNetworkModal(false);
+        // Don't clear verified state when disconnected - keep it for when they reconnect
       }
     };
     
@@ -100,7 +140,7 @@ export function useNetworkCheck() {
         clearInterval(pollInterval);
       }
     };
-  }, [address, isConnected, hasChecked]);
+  }, [address, isConnected, hasChecked, lastVerifiedCorrect, dismissedUntil, currentNetwork]);
 
   // Attempt automatic network switch
   const attemptAutoSwitch = useCallback(async () => {
@@ -137,22 +177,6 @@ export function useNetworkCheck() {
     // Store in localStorage so it persists across page reloads
     if (typeof window !== 'undefined') {
       localStorage.setItem('networkModalDismissedUntil', dismissUntil.toString());
-    }
-  }, []);
-
-  // Load dismissed state from localStorage on mount
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('networkModalDismissedUntil');
-      if (stored) {
-        const dismissedUntilTime = parseInt(stored, 10);
-        if (dismissedUntilTime > Date.now()) {
-          setDismissedUntil(dismissedUntilTime);
-        } else {
-          // Expired, clear it
-          localStorage.removeItem('networkModalDismissedUntil');
-        }
-      }
     }
   }, []);
 
