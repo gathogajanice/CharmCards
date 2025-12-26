@@ -14,7 +14,8 @@ import { detectNetworkFromAddress } from '@/lib/charms/network';
 import { useNetworkCheck } from '@/hooks/use-network-check';
 import type { GiftCardNftMetadata } from '@/lib/charms/types';
 import { toast } from 'sonner';
-import { useWalletBalance, useWalletCharms, useRefreshWalletData } from '@/hooks/use-wallet-data';
+import { useWalletBalance, useWalletCharms, useRefreshWalletData, useTransactionPolling } from '@/hooks/use-wallet-data';
+import { formatBalanceSatsPrimary } from '@/lib/utils/balance';
 import TransferGiftCardModal from '@/components/ui/transfer-gift-card-modal';
 import BurnGiftCardModal from '@/components/ui/burn-gift-card-modal';
 import RedeemGiftCardModal from '@/components/ui/redeem-gift-card-modal';
@@ -38,15 +39,49 @@ export default function WalletPage() {
   const [partialTransferModalOpen, setPartialTransferModalOpen] = useState(false);
   const [selectedCardForPartialTransfer, setSelectedCardForPartialTransfer] = useState<any | null>(null);
   const [selectedCards, setSelectedCards] = useState<Set<string>>(new Set());
+  const [newCardId, setNewCardId] = useState<string | null>(null);
   const router = useRouter();
   const { address, isConnected } = useAppKitAccount();
   const { currentNetwork } = useNetworkCheck();
+  const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
 
   // Use React Query hooks for optimized data fetching
   const { data: balance, isLoading: isLoadingBalance } = useWalletBalance(address, isConnected);
   const { data: walletCharms, isLoading: isLoadingCards } = useWalletCharms(address, isConnected);
   const { refreshAll } = useRefreshWalletData();
-
+  
+  // Get recent mint transaction IDs for confirmation polling
+  const recentMintTxids = (() => {
+    if (typeof window === 'undefined') return { commitTxid: undefined, spellTxid: undefined };
+    try {
+      const lastMinted = localStorage.getItem('lastMintedCard');
+      if (lastMinted) {
+        const card = JSON.parse(lastMinted);
+        // Only poll if minted in last hour
+        if (Date.now() - card.timestamp < 60 * 60 * 1000) {
+          return { commitTxid: card.commitTxid, spellTxid: card.spellTxid };
+        }
+      }
+    } catch (e) {
+      // Ignore
+    }
+    return { commitTxid: undefined, spellTxid: undefined };
+  })();
+  
+  // Poll for transaction confirmation if we have recent mint
+  useTransactionPolling(
+    recentMintTxids.commitTxid,
+    recentMintTxids.spellTxid,
+    () => {
+      // Transaction confirmed - refresh wallet data
+      refreshAll(address);
+      // Clear lastMintedCard after confirmation
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('lastMintedCard');
+      }
+    }
+  );
+  
   // Listen for refresh events from modals
   useEffect(() => {
     const handleRefresh = () => {
@@ -64,6 +99,33 @@ export default function WalletPage() {
     .filter(nft => nft.data) // Only NFTs with gift card data
     .map((nft, index) => {
       const data = nft.data as GiftCardNftMetadata;
+      
+      // Try to get transaction info from localStorage or nft object
+      let commitTxid: string | undefined;
+      let spellTxid: string | undefined;
+      
+      // First check if nft object has transaction IDs (from localStorage fallback)
+      if ((nft as any).commitTxid || (nft as any).spellTxid) {
+        commitTxid = (nft as any).commitTxid;
+        spellTxid = (nft as any).spellTxid;
+      } else {
+        // Try to get from localStorage by matching appId or brand
+        try {
+          const txHistory = JSON.parse(localStorage.getItem('charmCardsTxHistory') || '[]');
+          const matchingTx = txHistory.find((tx: any) => 
+            tx.type === 'mint' && 
+            (tx.appId === nft.app_id || 
+             (tx.brand === data.brand && Math.abs((tx.amount || 0) - (data.initial_amount / 100)) < 0.01))
+          );
+          if (matchingTx) {
+            commitTxid = matchingTx.commitTxid;
+            spellTxid = matchingTx.spellTxid;
+          }
+        } catch (e) {
+          // Ignore localStorage errors
+        }
+      }
+      
       return {
         id: `${nft.app_id}-${index}`,
         brand: data.brand,
@@ -73,10 +135,46 @@ export default function WalletPage() {
         expirationDate: data.expiration_date ? new Date(data.expiration_date * 1000).toISOString() : null,
         createdAt: data.created_at ? new Date(data.created_at * 1000).toISOString() : null,
         tokenId: nft.app_id,
-        transactionHash: '', // Will need to fetch from transaction data
+        transactionHash: spellTxid || commitTxid || '', // Use spellTxid as primary transaction hash
+        commitTxid,
+        spellTxid,
         category: '', // Can be extracted from brand or metadata if available
       };
     }) || [];
+
+  // Check for newly minted card from sessionStorage
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    try {
+      const newCardData = sessionStorage.getItem('newMintedCard');
+      if (newCardData) {
+        const card = JSON.parse(newCardData);
+        // Find matching card in giftCards by commitTxid or spellTxid
+        const matchingCard = giftCards.find(c => 
+          (c as any).commitTxid === card.commitTxid || 
+          (c as any).spellTxid === card.spellTxid ||
+          c.brand === card.brand && Math.abs(c.originalAmount - card.amount) < 0.01
+        );
+        
+        if (matchingCard) {
+          setNewCardId(matchingCard.id);
+          // Clear sessionStorage after use
+          sessionStorage.removeItem('newMintedCard');
+          
+          // Scroll to new card after a short delay
+          setTimeout(() => {
+            const element = document.getElementById(`card-${matchingCard.id}`);
+            if (element) {
+              element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+          }, 500);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to check for new card:', e);
+    }
+  }, [giftCards]);
 
   // Detect network from address
   const network = address ? detectNetworkFromAddress(address) : 'unknown';
@@ -139,13 +237,6 @@ export default function WalletPage() {
     return daysUntilExpiry <= 30 && daysUntilExpiry > 0;
   }).length;
 
-  // Format balance to show up to 2 decimal places, removing trailing zeros
-  const formatBalance = (bal: number | null): string => {
-    if (bal === null || bal === undefined) return '0';
-    // Round to 2 decimal places and remove trailing zeros
-    const rounded = Math.round(bal * 100) / 100;
-    return rounded.toFixed(2).replace(/\.?0+$/, '');
-  };
 
   // Manual refresh function using React Query
   const refreshBalance = () => {
@@ -250,67 +341,6 @@ export default function WalletPage() {
           </div>
         )}
 
-        {/* Wallet Info - Network and Balance */}
-        {isConnected && address && (
-          <div className="mb-8 p-6 bg-black/5 rounded-2xl border border-black/10">
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <div className="flex-1">
-                <div className="flex items-center gap-3 mb-2">
-                  <Network className="w-4 h-4 text-black/60" />
-                  <span className="text-[11px] text-black/40 uppercase tracking-wider font-medium">Network</span>
-                </div>
-                <p className="text-[18px] font-black text-black font-bricolage">
-                  {networkDisplayName}
-                  {network === 'testnet4' && (
-                    <span className="ml-2 text-[12px] text-black/50 font-normal">(Bitcoin Testnet4 Beta in Unisat)</span>
-                  )}
-                </p>
-                {address && (
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className="text-[11px] text-black/40 font-mono">{address.slice(0, 8)}...{address.slice(-6)}</span>
-                    <button
-                      onClick={() => {
-                        navigator.clipboard.writeText(address);
-                        setCopiedId('address');
-                        setTimeout(() => setCopiedId(null), 2000);
-                      }}
-                      className="text-black/40 hover:text-black transition-colors"
-                    >
-                      {copiedId === 'address' ? (
-                        <Check className="w-3 h-3" />
-                      ) : (
-                        <Copy className="w-3 h-3" />
-                      )}
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div className="text-right">
-                <div className="flex items-center justify-end gap-2 mb-2">
-                  <Bitcoin className="w-4 h-4 text-black/60" />
-                  <span className="text-[11px] text-black/40 uppercase tracking-wider font-medium">Balance</span>
-                  <button
-                    onClick={refreshBalance}
-                    disabled={isLoadingBalance}
-                    className="w-5 h-5 rounded-full flex items-center justify-center hover:bg-black/10 transition-colors disabled:opacity-50"
-                    title="Refresh balance"
-                  >
-                    <RefreshCw className={`w-3 h-3 text-black/60 ${isLoadingBalance ? 'animate-spin' : ''}`} />
-                  </button>
-                </div>
-                {isLoadingBalance ? (
-                  <p className="text-[18px] font-black text-black font-bricolage">Loading...</p>
-                ) : balance !== null && balance !== undefined ? (
-                  <p className="text-[18px] font-black text-black font-bricolage">
-                    {formatBalance(balance)} BTC
-                  </p>
-                ) : (
-                  <p className="text-[18px] font-black text-black/40 font-bricolage">—</p>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
 
         {/* Batch Operations Bar */}
         {selectedCards.size > 0 && (
@@ -427,18 +457,29 @@ export default function WalletPage() {
               const isExpiringSoon = daysUntilExpiry !== null && daysUntilExpiry <= 30 && daysUntilExpiry > 0;
               const isSelected = selectedCards.has(card.id);
               
+              const isNewCard = newCardId === card.id;
+              const isRecentlyMinted = card.createdAt && 
+                (Date.now() - new Date(card.createdAt).getTime()) < 24 * 60 * 60 * 1000; // Last 24 hours
+              
               return (
               <motion.div
                 key={card.id}
+                id={`card-${card.id}`}
                 initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
+                animate={{ 
+                  opacity: 1, 
+                  y: 0,
+                  scale: isNewCard ? [1, 1.02, 1] : 1,
+                }}
                 whileHover={{ y: -2 }}
                 transition={{ 
                   duration: 0.3, 
                   delay: index * 0.05
                 }}
                 className={`bg-white border rounded-2xl overflow-hidden transition-all group cursor-pointer ${
-                  isSelected ? 'border-[#2A9DFF] border-2 shadow-lg' : 'border-black/5 hover:border-black/10'
+                  isSelected ? 'border-[#2A9DFF] border-2 shadow-lg' : 
+                  isNewCard ? 'border-green-500 border-2 shadow-lg ring-4 ring-green-500/20' :
+                  'border-black/5 hover:border-black/10'
                 }`}
                 onClick={(e) => {
                   // Toggle selection on checkbox click, open details otherwise
@@ -499,6 +540,11 @@ export default function WalletPage() {
                     <div className="bg-black text-white text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full">
                       NFT
                     </div>
+                    {(isNewCard || isRecentlyMinted) && (
+                      <div className="bg-green-500 text-white text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full animate-pulse">
+                        NEW
+                      </div>
+                    )}
                     {isExpired && (
                       <div className="bg-red-600 text-white text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full">
                         Expired
@@ -554,25 +600,52 @@ export default function WalletPage() {
                     )}
                   </div>
 
-                  {/* Token ID */}
-                  <div className="flex items-center gap-2 mb-4 pb-4 border-b border-black/5">
-                    <span className="text-[10px] text-black/40 uppercase tracking-wider font-medium">Token:</span>
-                    <button
-                      onClick={() => copyToClipboard(card.tokenId, card.id)}
-                      className="flex items-center gap-1 text-[10px] font-mono text-black/60 hover:text-black transition-colors"
-                    >
-                      {copiedId === card.id ? (
-                        <>
-                          <Check className="w-3 h-3" />
-                          <span>Copied</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" />
-                          <span>{card.tokenId}</span>
-                        </>
-                      )}
-                    </button>
+                  {/* Token ID and Transaction Links */}
+                  <div className="space-y-2 mb-4 pb-4 border-b border-black/5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-black/40 uppercase tracking-wider font-medium">Token:</span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          copyToClipboard(card.tokenId, card.id);
+                        }}
+                        className="flex items-center gap-1 text-[10px] font-mono text-black/60 hover:text-black transition-colors"
+                      >
+                        {copiedId === card.id ? (
+                          <>
+                            <Check className="w-3 h-3" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>{card.tokenId.substring(0, 8)}...</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    {(card.commitTxid || card.spellTxid || card.transactionHash) && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-black/40 uppercase tracking-wider font-medium">TX:</span>
+                        <a
+                          href={card.spellTxid 
+                            ? `${NETWORK === 'testnet4' ? 'https://memepool.space/testnet4/tx/' : 'https://memepool.space/tx/'}${card.spellTxid}`
+                            : card.commitTxid
+                            ? `${NETWORK === 'testnet4' ? 'https://memepool.space/testnet4/tx/' : 'https://memepool.space/tx/'}${card.commitTxid}`
+                            : card.transactionHash
+                            ? `${NETWORK === 'testnet4' ? 'https://memepool.space/testnet4/tx/' : 'https://memepool.space/tx/'}${card.transactionHash}`
+                            : '#'
+                          }
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex items-center gap-1 text-[10px] text-[#2A9DFF] hover:text-[#1A8DFF] transition-colors font-medium"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span>View Transaction</span>
+                        </a>
+                      </div>
+                    )}
                   </div>
 
                   {/* Actions */}

@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Search, Menu, User, X, ChevronRight, LogOut, Wallet, Coins, Network, CheckCircle2, AlertCircle, Bitcoin } from "lucide-react";
+import { Search, Menu, User, X, ChevronRight, LogOut, Wallet, Coins, Network, CheckCircle2, AlertCircle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useAppKit, useAppKitAccount } from "@reown/appkit/react";
 import { useNetworkCheck } from '@/hooks/use-network-check';
@@ -12,7 +12,7 @@ import TestnetFaucet from '@/components/ui/testnet-faucet';
 import WalletSelectModal from '@/components/ui/wallet-select-modal';
 import { attemptNetworkSwitch, detectWalletName, getNetworkFromWallet } from '@/lib/charms/network';
 import { getWalletBalance } from '@/lib/charms/wallet';
-import { formatBalance, formatSatsCompact } from '@/lib/utils/balance';
+import { formatBalanceSatsOnly } from '@/lib/utils/balance';
 
 // Component to show connected wallet name
 function ConnectedWalletName() {
@@ -54,6 +54,7 @@ export default function Navbar() {
   const [isScrolled, setIsScrolled] = useState(false);
   const [balance, setBalance] = useState<number | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
+  const [displayBalance, setDisplayBalance] = useState<number | null>(null);
   const pathname = usePathname();
   const { open } = useAppKit();
   const { address, isConnected } = useAppKitAccount();
@@ -65,11 +66,12 @@ export default function Navbar() {
     dismissModal,
   } = useNetworkCheck();
 
-  // Fetch wallet balance
+  // Fetch wallet balance - prevent blinking by only updating display when value actually changes
   useEffect(() => {
     const fetchBalance = async () => {
       if (!address || !isConnected) {
         setBalance(null);
+        setDisplayBalance(null);
         return;
       }
 
@@ -78,18 +80,28 @@ export default function Navbar() {
         const walletBalance = await getWalletBalance(address, null);
         if (walletBalance !== null && walletBalance !== undefined) {
           setBalance(walletBalance);
+          // Only update display if value actually changed (prevents blinking)
+          setDisplayBalance(prev => {
+            if (prev === null || Math.abs(prev - walletBalance) > 0.00000001) {
+              return walletBalance;
+            }
+            return prev;
+          });
+        } else {
+          setBalance(null);
+          setDisplayBalance(null);
         }
       } catch (error) {
         console.error('Failed to fetch balance:', error);
-        setBalance(null);
+        // Don't clear display on error to prevent blinking
       } finally {
         setIsLoadingBalance(false);
       }
     };
 
     fetchBalance();
-    // Refresh balance every 10 seconds
-    const interval = setInterval(fetchBalance, 10000);
+    // Refresh balance every 15 seconds (less frequent to reduce blinking)
+    const interval = setInterval(fetchBalance, 15000);
     return () => clearInterval(interval);
   }, [address, isConnected]);
 
@@ -128,14 +140,18 @@ export default function Navbar() {
             <Link
               href="/"
               aria-label="Charm Cards"
-              className="flex items-center gap-3 transition-opacity hover:opacity-80"
+              className="flex items-center gap-3 transition-opacity hover:opacity-80 cursor-pointer"
+              onClick={(e) => {
+                // Ensure navigation happens
+                e.stopPropagation();
+              }}
             >
               <img 
                 src="https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766104251676.png?width=8000&height=8000&resize=contain" 
                 alt="Charm Cards" 
-                className="h-10 sm:h-12 w-auto drop-shadow-sm"
+                className="h-10 sm:h-12 w-auto drop-shadow-sm pointer-events-none"
               />
-              <span className={`text-xl sm:text-2xl font-black font-bricolage tracking-tight ${!isTransparent ? "text-black" : "text-white"}`}>
+              <span className={`text-xl sm:text-2xl font-black font-bricolage tracking-tight ${!isTransparent ? "text-black" : "text-white"} pointer-events-none`}>
                 Charm Cards
               </span>
             </Link>
@@ -161,29 +177,16 @@ export default function Navbar() {
 
         <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
             {/* Wallet Connection with Balance */}
-            <div className="hidden md:flex items-center gap-2">
-              {/* BTC Balance - Show when connected */}
-              {isConnected && balance !== null && (
+            <div className="hidden md:flex items-center gap-3">
+              {/* Balance - Show when connected (sats primary, BTC secondary) */}
+              {isConnected && displayBalance !== null && (
                 <motion.div
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className={`flex items-center gap-2 h-9 px-3 rounded-full text-[12px] font-semibold transition-all duration-300 ${
-                    !isTransparent 
-                      ? "bg-[#2A9DFF]/10 text-[#2A9DFF] border border-[#2A9DFF]/20" 
-                      : "bg-white/20 text-white border border-white/30"
-                  }`}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="flex items-center gap-2.5 h-10 px-4 rounded-full bg-black text-white border-0"
                 >
-                  <Bitcoin size={14} />
-                  <span className="font-bold">
-                    {isLoadingBalance ? '...' : (
-                      <>
-                        {formatBalance(balance)} <span className="text-[10px] opacity-70">BTC</span>
-                        <span className="text-[10px] opacity-60 mx-1">•</span>
-                        <span className="text-[10px] opacity-70 font-normal">
-                          {formatSatsCompact(balance ? balance * 100_000_000 : 0)}
-                        </span>
-                      </>
-                    )}
+                  <span className="text-[13px] font-bold leading-none">
+                    {formatBalanceSatsOnly(displayBalance)}
                   </span>
                 </motion.div>
               )}
@@ -338,20 +341,11 @@ export default function Navbar() {
                   </button>
                 )}
                 
-                {/* BTC Balance in Mobile Menu */}
-                {isConnected && balance !== null && (
-                  <div className="flex items-center justify-center h-12 rounded-xl border border-[#2A9DFF]/20 bg-[#2A9DFF]/10 text-[#2A9DFF] text-[14px] font-semibold gap-2">
-                    <Bitcoin size={16} />
-                    <span className="font-bold">
-                      {isLoadingBalance ? '...' : (
-                        <>
-                          {formatBalance(balance)} <span className="text-[12px] opacity-70">BTC</span>
-                          <span className="text-[10px] opacity-50 mx-1">•</span>
-                          <span className="text-[12px] opacity-70 font-normal">
-                            {formatSatsCompact(balance ? balance * 100_000_000 : 0)}
-                          </span>
-                        </>
-                      )}
+                {/* Balance in Mobile Menu (sats only) */}
+                {isConnected && displayBalance !== null && (
+                  <div className="flex items-center justify-center h-12 rounded-xl bg-black text-white text-[14px] font-semibold gap-2.5">
+                    <span className="text-[14px] font-bold leading-none">
+                      {formatBalanceSatsOnly(displayBalance)}
                     </span>
                   </div>
                 )}
@@ -374,6 +368,7 @@ export default function Navbar() {
       <TestnetFaucet
         isOpen={showFaucet}
         onClose={() => setShowFaucet(false)}
+        autoOpen={true}
       />
 
       {/* Wallet Selection Modal */}

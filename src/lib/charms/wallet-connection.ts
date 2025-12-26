@@ -240,11 +240,45 @@ export async function connectUnisatDirectly(): Promise<string | null> {
     // Request account access - this explicitly authorizes the origin
     // This is the key step that grants authorization for signing transactions
     console.log('🔐 Requesting Unisat authorization for this origin...');
-    const accounts = await unisat.requestAccounts();
+    
+    // Try to request Taproot address first
+    let accounts: string[] = [];
+    
+    // Method 1: Try requesting Taproot address type
+    if (typeof unisat.requestAccounts === 'function') {
+      try {
+        const taprootAccounts = await unisat.requestAccounts({ addressType: 'taproot' });
+        if (taprootAccounts && taprootAccounts.length > 0) {
+          console.log('✅ Unisat connected with Taproot address:', taprootAccounts[0]);
+          return taprootAccounts[0];
+        }
+      } catch (e) {
+        // Taproot request not supported, fall back to regular request
+      }
+    }
+    
+    // Method 2: Try switching address type programmatically
+    if (typeof unisat.switchAddressType === 'function') {
+      try {
+        await unisat.switchAddressType('taproot');
+        await new Promise(resolve => setTimeout(resolve, 500)); // Wait for switch
+        accounts = await unisat.getAccounts();
+        if (accounts && accounts.length > 0 && accounts[0].startsWith('tb1p')) {
+          console.log('✅ Unisat switched to Taproot address:', accounts[0]);
+          return accounts[0];
+        }
+      } catch (e) {
+        // Switching not supported, continue with regular connection
+      }
+    }
+    
+    // Method 3: Regular connection (fallback)
+    accounts = await unisat.requestAccounts();
     
     if (accounts && accounts.length > 0) {
       const address = accounts[0];
       console.log('✅ Unisat connected and authorized:', address);
+      // Note: Address might not be Taproot, but TaprootAddressChecker will handle it
       return address;
     }
     

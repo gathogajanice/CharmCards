@@ -7,6 +7,7 @@ import { mainnet, arbitrum, bitcoin } from "@reown/appkit/networks";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiProvider } from "wagmi";
 import React, { ReactNode } from "react";
+import { TaprootAddressChecker } from "@/components/taproot-address-checker";
 
 // 1. Get projectId from user
 const projectId = "017586850c1165c7bcf777883e747a02";
@@ -71,7 +72,10 @@ const queryClient = new QueryClient();
 export default function Web3Provider({ children }: { children: ReactNode }) {
   return (
     <WagmiProvider config={wagmiAdapter.wagmiConfig}>
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+      <QueryClientProvider client={queryClient}>
+        <TaprootAddressChecker />
+        {children}
+      </QueryClientProvider>
     </WagmiProvider>
   );
 }

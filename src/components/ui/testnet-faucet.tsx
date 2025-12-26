@@ -7,48 +7,76 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAppKitAccount } from '@reown/appkit/react';
 import { toast } from 'sonner';
 import { getWalletUtxos, getWalletBalance } from '@/lib/charms/wallet';
+import { isTaprootAddress } from '@/lib/charms/taproot-address';
+import { formatBalanceSatsOnly } from '@/lib/utils/balance';
 
 interface TestnetFaucetProps {
   isOpen: boolean;
   onClose: () => void;
+  autoOpen?: boolean; // Auto-open when Taproot address detected
 }
 
 const TESTNET4_FAUCETS = [
   {
+    name: 'Coinfaucet.eu Testnet4',
+    url: 'https://coinfaucet.eu/en/btc-testnet4/',
+    description: 'Reliable Testnet4 faucet - Supports Taproot addresses',
+    supportsTaproot: true,
+  },
+  {
     name: 'Bitcoin Testnet4 Faucet',
     url: 'https://bitcoinfaucet.uo1.net/',
-    description: 'Official Bitcoin Testnet4 faucet',
+    description: 'Official Bitcoin Testnet4 faucet - Works with Taproot (tb1p...)',
+    supportsTaproot: true,
   },
   {
-    name: 'Coinfaucet.eu',
-    url: 'https://coinfaucet.eu/en/btc-testnet4/',
-    description: 'Reliable Testnet4 faucet',
-  },
-  {
-    name: 'Testnet4 Faucet',
-    url: 'https://testnet4.bitcoinfaucet.uo1.net/',
-    description: 'Alternative Testnet4 faucet',
+    name: 'Mempool Testnet4 Faucet',
+    url: 'https://mempool.space/testnet4/faucet',
+    description: 'Mempool.space faucet - Taproot compatible',
+    supportsTaproot: true,
   },
 ];
 
-export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
+export default function TestnetFaucet({ isOpen, onClose, autoOpen = false }: TestnetFaucetProps) {
   const { address, isConnected } = useAppKitAccount();
   const [copied, setCopied] = useState(false);
   const [balance, setBalance] = useState<number | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
-
-  // Format balance to show up to 2 decimal places, removing trailing zeros
-  const formatBalance = (bal: number | null): string => {
-    if (bal === null || bal === undefined) return '0';
-    // Round to 2 decimal places and remove trailing zeros
-    const rounded = Math.round(bal * 100) / 100;
-    return rounded.toFixed(2).replace(/\.?0+$/, '');
+  const [internalIsOpen, setInternalIsOpen] = useState(false);
+  
+  // Check if faucet has already been shown (persists across page loads)
+  const getHasAutoOpened = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    const stored = localStorage.getItem('faucetModalShown');
+    return stored === 'true';
   };
+  
+  const [hasAutoOpened, setHasAutoOpened] = useState<boolean>(getHasAutoOpened());
+
+  // Auto-open when Taproot address is detected (only if not already shown before)
+  useEffect(() => {
+    if (autoOpen && address && isConnected && isTaprootAddress(address) && !hasAutoOpened && !isOpen) {
+      setInternalIsOpen(true);
+      setHasAutoOpened(true);
+      // Store in localStorage so it persists across page loads
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('faucetModalShown', 'true');
+      }
+    }
+  }, [address, isConnected, autoOpen, hasAutoOpened, isOpen]);
+
+  const actualIsOpen = isOpen || internalIsOpen;
+  
+  const handleClose = () => {
+    setInternalIsOpen(false);
+    onClose();
+  };
+
 
   // Fetch Bitcoin balance - try wallet first, then UTXOs
   useEffect(() => {
     const fetchBalance = async () => {
-      if (!address || !isConnected || !isOpen) {
+      if (!address || !isConnected || !actualIsOpen) {
         setBalance(null);
         return;
       }
@@ -78,13 +106,13 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
       }
     };
 
-    if (isOpen) {
+    if (actualIsOpen) {
       fetchBalance();
       // Refresh balance every 5 seconds while modal is open
       const interval = setInterval(fetchBalance, 5000);
       return () => clearInterval(interval);
     }
-  }, [address, isConnected, isOpen]);
+  }, [address, isConnected, actualIsOpen]);
 
   const copyAddress = () => {
     if (address) {
@@ -106,14 +134,14 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
 
   const modalContent = (
     <AnimatePresence>
-      {isOpen && (
+      {actualIsOpen && (
         <>
           {/* Use high z-index to ensure modal appears above all content including navbar */}
           <div 
             className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
             onClick={(e) => {
               if (e.target === e.currentTarget) {
-                onClose();
+                handleClose();
               }
             }}
             onWheel={(e) => {
@@ -148,7 +176,7 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
               </div>
             </div>
             <button
-              onClick={onClose}
+              onClick={handleClose}
               className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-secondary transition-colors flex-shrink-0 ml-2"
               aria-label="Close"
             >
@@ -178,7 +206,7 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
                     <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                   ) : balance !== null ? (
                     <span className="text-[20px] font-black text-foreground font-bricolage">
-                      {formatBalance(balance)} BTC
+                      {formatBalanceSatsOnly(balance)}
                     </span>
                   ) : (
                     <span className="text-[14px] text-muted-foreground">—</span>
@@ -193,19 +221,20 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <p className="text-[12px] text-muted-foreground mb-1.5 uppercase tracking-wider font-medium">
-                      Your Address
+                      Your Taproot Address
                     </p>
-                    <p className="text-[13px] font-mono text-foreground break-all">{address}</p>
+                    <p className="text-[13px] font-mono text-foreground break-all select-all">{address}</p>
                   </div>
                   <button
+                    type="button"
                     onClick={copyAddress}
-                    className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-secondary transition-colors flex-shrink-0 ml-2"
+                    className="w-10 h-10 rounded-full flex items-center justify-center bg-black text-white flex-shrink-0 ml-2 cursor-pointer"
                     title="Copy address"
                   >
                     {copied ? (
-                      <Check className="w-4 h-4 text-green-500" />
+                      <Check className="w-5 h-5" />
                     ) : (
-                      <Copy className="w-4 h-4 text-muted-foreground" />
+                      <Copy className="w-5 h-5" />
                     )}
                   </button>
                 </div>
@@ -218,51 +247,112 @@ export default function TestnetFaucet({ isOpen, onClose }: TestnetFaucetProps) {
               </div>
             )}
 
+            {/* Address Type Info */}
+            {address && isTaprootAddress(address) && (
+              <div className="bg-green-500/10 border-2 border-green-500/30 rounded-[12px] p-4 mb-4">
+                <div className="flex items-start gap-2">
+                  <span className="text-[20px] flex-shrink-0">✅</span>
+                  <div className="flex-1">
+                    <p className="text-[14px] font-bold text-foreground mb-1">
+                      Taproot Address Ready!
+                    </p>
+                    <p className="text-[13px] text-foreground leading-relaxed">
+                      Your address is ready. Click any faucet button below to get testnet tokens. Your address will be copied automatically.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Faucets List */}
             <div className="mb-4">
-              <h4 className="text-[14px] font-semibold text-foreground mb-3">
-                Testnet4 Faucets:
+              <h4 className="text-[16px] font-bold text-foreground mb-4">
+                Testnet4 Faucets (Taproot Compatible):
               </h4>
               <div className="space-y-2">
-                {TESTNET4_FAUCETS.map((faucet, index) => (
-                  <a
-                    key={index}
-                    href={faucet.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center justify-between p-3 rounded-[8px] border border-border hover:border-accent hover:bg-accent/5 transition-all group"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[14px] font-medium text-foreground group-hover:text-accent transition-colors">
-                        {faucet.name}
-                      </p>
-                      <p className="text-[12px] text-muted-foreground mt-0.5">
-                        {faucet.description}
-                      </p>
+                {TESTNET4_FAUCETS.map((faucet, index) => {
+                  const handleCopyAndOpen = (e: React.MouseEvent<HTMLButtonElement>) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (address) {
+                      navigator.clipboard.writeText(address);
+                      toast.success('Address copied! Opening faucet...');
+                      setTimeout(() => {
+                        window.open(faucet.url, '_blank', 'noopener,noreferrer');
+                      }, 300);
+                    } else {
+                      toast.error('Please connect your wallet first');
+                    }
+                  };
+
+                  const handleDirectOpen = (e: React.MouseEvent<HTMLButtonElement>) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.open(faucet.url, '_blank', 'noopener,noreferrer');
+                  };
+
+                  return (
+                    <div
+                      key={index}
+                      className="flex flex-col p-4 rounded-[12px] border-2 border-border bg-background hover:border-primary hover:shadow-md transition-all"
+                    >
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap mb-1">
+                            <p className="text-[15px] font-bold text-foreground">
+                              {faucet.name}
+                            </p>
+                            {faucet.supportsTaproot && (
+                              <span className="text-[11px] px-2 py-1 rounded-md bg-green-500/20 text-green-700 dark:text-green-400 font-semibold border border-green-500/30">
+                                Taproot ✓
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[13px] text-foreground/80 leading-relaxed">
+                            {faucet.description}
+                          </p>
+                        </div>
+                      </div>
+                      {address ? (
+                        <button
+                          type="button"
+                          onClick={handleCopyAndOpen}
+                          className="w-full h-12 rounded-[8px] bg-black text-white font-bold text-[14px] flex items-center justify-center gap-2 cursor-pointer border-0"
+                        >
+                          <Copy className="w-4 h-4" />
+                          Copy Address & Open Faucet
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleDirectOpen}
+                          className="w-full h-12 rounded-[8px] bg-black text-white font-bold text-[14px] flex items-center justify-center gap-2 cursor-pointer border-0"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                          Open Faucet
+                        </button>
+                      )}
                     </div>
-                    <ExternalLink className="w-4 h-4 text-muted-foreground group-hover:text-accent transition-colors flex-shrink-0 ml-2" />
-                  </a>
-                ))}
+                  );
+                })}
               </div>
             </div>
 
-            {/* Tip Card */}
-            <div className="bg-accent/5 border border-accent/20 rounded-[12px] p-4">
-              <div className="flex items-start gap-2">
-                <span className="text-[16px] flex-shrink-0">💡</span>
-                <p className="text-[13px] text-foreground leading-relaxed">
-                  <strong className="font-semibold">Tip:</strong> Copy your address above and paste it into any faucet. 
-                  You'll receive Testnet4 BTC within a few minutes.
+            {/* Simple Instructions */}
+            {address && isTaprootAddress(address) && (
+              <div className="bg-blue-500/10 border-2 border-blue-500/30 rounded-[12px] p-4 mb-4">
+                <p className="text-[13px] text-foreground text-center leading-relaxed">
+                  <strong className="font-bold">Click any faucet button below.</strong> Your address will be copied automatically and the faucet will open in a new tab.
                 </p>
               </div>
-            </div>
+            )}
           </div>
 
           {/* Footer - Fixed */}
           <div className="p-6 pt-4 border-t border-border flex-shrink-0">
             <button
-              onClick={onClose}
-              className="w-full h-11 rounded-full bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity"
+              onClick={handleClose}
+              className="w-full h-11 rounded-full bg-black text-white font-medium cursor-pointer"
             >
               Got it!
             </button>
