@@ -205,9 +205,14 @@ export default function TestnetFaucet({ isOpen, onClose, autoOpen = false }: Tes
                   {isLoadingBalance ? (
                     <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
                   ) : balance !== null ? (
-                    <span className="text-[20px] font-black text-foreground font-bricolage">
-                      {formatBalanceSatsOnly(balance)}
-                    </span>
+                    <div className="flex flex-col items-end gap-0.5">
+                      <span className="text-[20px] font-black text-foreground font-bricolage leading-tight">
+                        {formatBalanceSatsOnly(balance)}
+                      </span>
+                      <span className="text-[13px] text-muted-foreground font-mono leading-tight">
+                        {balance.toFixed(8)} BTC
+                      </span>
+                    </div>
                   ) : (
                     <span className="text-[14px] text-muted-foreground">—</span>
                   )}
