@@ -108,8 +108,14 @@ router.post('/mint', async (req: Request, res: Response) => {
     }
 
     // Validate UTXO has sufficient value
-    // Convert initialAmount (cents) to sats: 1 cent = 1000 sats (conservative for testnet)
-    const giftCardAmountSats = validatedAmount * 1000;
+    // Convert initialAmount (cents) to sats
+    // For testnet: Use 1 cent = 1 sat (affordable for testing, testnet coins have no real value)
+    // For mainnet: Use 1 cent = 1000 sats (conservative rate to protect real value)
+    // Note: The actual gift card value is stored in cents in the spell metadata, not sats
+    // This conversion only affects how much Bitcoin you need to have in your wallet
+    const giftCardAmountSats = IS_TESTNET 
+      ? validatedAmount * 1  // Testnet: 1 cent = 1 sat (affordable testing)
+      : validatedAmount * 1000; // Mainnet: 1 cent = 1000 sats (conservative)
     const requiredSats = giftCardAmountSats + MIN_FEE_BUFFER_SATS;
     
     const valueCheck = validateUTXOValue(utxoValidation.utxo.value, requiredSats);

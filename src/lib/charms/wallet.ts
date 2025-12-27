@@ -430,7 +430,23 @@ export async function signCommitTransaction(
     let psbtBase64: string;
     try {
       psbtBase64 = await hexToPsbtWithWalletUtxos(commitTxHex, address);
-      console.log('✅ PSBT created successfully, requesting wallet signature...');
+      console.log('✅ PSBT created successfully');
+      console.log(`📦 PSBT length: ${psbtBase64.length}, first 50 chars: ${psbtBase64.substring(0, 50)}`);
+      
+      // Validate PSBT format before sending to wallet
+      try {
+        const { Psbt } = await import('bitcoinjs-lib');
+        const network = process.env.NEXT_PUBLIC_BITCOIN_NETWORK === 'testnet4' || process.env.NEXT_PUBLIC_BITCOIN_NETWORK === 'testnet'
+          ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
+          : require('bitcoinjs-lib').networks.bitcoin;
+        Psbt.fromBase64(psbtBase64, { network });
+        console.log('✅ PSBT format validated');
+      } catch (validateError: any) {
+        console.error('❌ PSBT validation failed:', validateError);
+        throw new Error(`Invalid PSBT format: ${validateError.message}. Cannot send to wallet.`);
+      }
+      
+      console.log('📱 Requesting wallet signature...');
     } catch (psbtError: any) {
       console.error('❌ PSBT conversion failed:', psbtError);
       throw new Error(`Failed to convert transaction to PSBT: ${psbtError.message}. Please ensure your wallet is connected and has UTXOs.`);
@@ -446,12 +462,88 @@ export async function signCommitTransaction(
             console.log('🔐 Signing commit transaction with Unisat wallet...');
             console.log('📱 WALLET POPUP SHOULD APPEAR NOW - Please approve in your wallet');
             // Unisat signPsbt triggers popup - this is what we want!
-            const signedPsbt = await unisat.signPsbt(psbtBase64, {
-              autoFinalize: false, // Don't finalize, we'll extract the hex
-            });
-            console.log('✅ Unisat signed commit PSBT, extracting transaction hex...');
-            // Extract signed transaction hex from PSBT
-            return psbtToHex(signedPsbt);
+            try {
+              const signedResponse = await unisat.signPsbt(psbtBase64, {
+                autoFinalize: false, // Don't finalize, we'll extract the hex
+              });
+              console.log('✅ Unisat signed commit PSBT');
+              console.log(`📦 Response type: ${typeof signedResponse}`);
+              console.log(`📦 Response:`, signedResponse);
+              
+              // Unisat might return an object or a string
+              let signedPsbt: string;
+              if (typeof signedResponse === 'string') {
+                signedPsbt = signedResponse;
+              } else if (signedResponse && typeof signedResponse === 'object') {
+                // Check common property names
+                signedPsbt = signedResponse.psbt || signedResponse.hex || signedResponse.txHex || 
+                            signedResponse.signedPsbt || signedResponse.result || 
+                            JSON.stringify(signedResponse);
+                console.log(`📦 Extracted PSBT/hex from object: ${signedPsbt.substring(0, 100)}...`);
+              } else {
+                throw new Error(`Unexpected response format from Unisat: ${typeof signedResponse}`);
+              }
+              
+              console.log(`📦 Signed PSBT/hex length: ${signedPsbt.length}`);
+              console.log(`📦 First 100 chars: ${signedPsbt.substring(0, 100)}`);
+              
+              // Extract signed transaction hex from PSBT (or transaction hex if wallet returned it directly)
+              return psbtToHex(signedPsbt);
+            } catch (extractError: any) {
+              // If extraction fails, try with autoFinalize: true (wallet might return hex directly)
+              if (extractError.message?.includes('Invalid Magic Number') || extractError.message?.includes('PSBT extraction') || extractError.message?.includes('Invalid format')) {
+                console.log('⚠️ PSBT extraction failed, trying with autoFinalize: true...');
+                console.log(`   Error: ${extractError.message}`);
+                try {
+                  const signedResult = await unisat.signPsbt(psbtBase64, {
+                    autoFinalize: true, // Let wallet finalize and return transaction hex
+                  });
+                  console.log('✅ Unisat signed with autoFinalize: true');
+                  console.log(`📦 Result type: ${typeof signedResult}, value:`, signedResult);
+                  
+                  // Handle object response
+                  let resultString: string;
+                  if (typeof signedResult === 'string') {
+                    resultString = signedResult;
+                  } else if (signedResult && typeof signedResult === 'object') {
+                    resultString = signedResult.psbt || signedResult.hex || signedResult.txHex || 
+                                  signedResult.signedPsbt || signedResult.result || 
+                                  JSON.stringify(signedResult);
+                  } else {
+                    throw new Error(`Unexpected response format: ${typeof signedResult}`);
+                  }
+                  
+                  // If autoFinalize is true, Unisat should return a finalized transaction hex
+                  // Check if it's already a transaction hex (not a PSBT)
+                  const trimmedResult = resultString.trim();
+                  const isHex = /^[0-9a-fA-F]+$/.test(trimmedResult);
+                  
+                  // If it looks like a transaction hex (starts with version bytes, not PSBT magic)
+                  if (isHex && !trimmedResult.toLowerCase().startsWith('70736274ff') && trimmedResult.length > 200) {
+                    try {
+                      // Try to parse as transaction hex directly
+                      const { Transaction } = await import('bitcoinjs-lib');
+                      const network = process.env.NEXT_PUBLIC_BITCOIN_NETWORK === 'testnet4' || process.env.NEXT_PUBLIC_BITCOIN_NETWORK === 'testnet'
+                        ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
+                        : require('bitcoinjs-lib').networks.bitcoin;
+                      const tx = Transaction.fromHex(trimmedResult);
+                      console.log('✅ Unisat returned finalized transaction hex directly (autoFinalize: true)');
+                      return trimmedResult;
+                    } catch (txError) {
+                      // Not a valid transaction hex, continue to PSBT parsing
+                      console.log('   Not a valid transaction hex, trying PSBT format...');
+                    }
+                  }
+                  
+                  // Otherwise, try to extract from PSBT
+                  return psbtToHex(resultString);
+                } catch (retryError: any) {
+                  console.error('❌ Retry with autoFinalize: true also failed:', retryError);
+                  throw new Error(`PSBT extraction failed with both autoFinalize: false and true. Original error: ${extractError.message}, Retry error: ${retryError.message}`);
+                }
+              }
+              throw extractError;
+            }
           }
         } catch (err: any) {
           console.warn('Unisat signing failed:', err);

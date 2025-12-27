@@ -21,10 +21,14 @@ export const MIN_FEE_BUFFER_SATS = IS_TESTNET ? 500 : 5000;
 
 // Minimum UTXO value required (gift card amount + fees)
 export function calculateMinimumRequiredSats(giftCardAmountCents: number): number {
-  // Convert cents to sats (1 USD = 100 cents, approximate 1 USD = 100,000 sats)
-  // More accurately: 1 BTC = 100,000,000 sats, so 1 USD ≈ 100,000 sats at $1/BTC (testnet)
-  // For testnet, we'll use a simpler conversion: 1 cent = 1000 sats (conservative)
-  const giftCardAmountSats = giftCardAmountCents * 1000;
+  // Convert cents to sats
+  // For testnet: Use 1 cent = 1 sat (affordable for testing, testnet coins have no real value)
+  // For mainnet: Use 1 cent = 1000 sats (conservative rate to protect real value)
+  // Note: The actual gift card value is stored in cents in the spell metadata, not sats
+  // This conversion only affects how much Bitcoin you need to have in your wallet
+  const giftCardAmountSats = IS_TESTNET 
+    ? giftCardAmountCents * 1  // Testnet: 1 cent = 1 sat (affordable testing)
+    : giftCardAmountCents * 1000; // Mainnet: 1 cent = 1000 sats (conservative)
   
   // Calculate total required: gift card amount + transaction fees + safety buffer
   const totalRequired = giftCardAmountSats + MIN_FEE_BUFFER_SATS + ESTIMATED_TOTAL_FEE_SATS;
@@ -55,7 +59,10 @@ export function calculateTotalCostSats(giftCardAmountCents: number): {
   minimumRequiredSats: number;
   network: string;
 } {
-  const giftCardSats = giftCardAmountCents * 1000;
+  // Use same conversion rate as calculateMinimumRequiredSats
+  const giftCardSats = IS_TESTNET 
+    ? giftCardAmountCents * 1  // Testnet: 1 cent = 1 sat
+    : giftCardAmountCents * 1000; // Mainnet: 1 cent = 1000 sats
   const estimatedFeesSats = ESTIMATED_TOTAL_FEE_SATS;
   const totalSats = giftCardSats + estimatedFeesSats;
   const minimumRequiredSats = totalSats + MIN_FEE_BUFFER_SATS;
