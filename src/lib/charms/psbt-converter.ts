@@ -188,13 +188,13 @@ export async function hexToPsbt(
         
         // Fallback to direct fetch (may fail due to CORS)
         if (!prevTxHex) {
-          try {
-            const explorerUrl = NETWORK === 'testnet4'
-              ? `https://memepool.space/testnet4/api/tx/${txid}/hex`
-              : `https://memepool.space/api/tx/${txid}/hex`;
-            
-            const response = await fetch(explorerUrl, { cache: 'no-store' });
-            if (response.ok) {
+        try {
+          const explorerUrl = NETWORK === 'testnet4'
+            ? `https://memepool.space/testnet4/api/tx/${txid}/hex`
+            : `https://memepool.space/api/tx/${txid}/hex`;
+          
+          const response = await fetch(explorerUrl, { cache: 'no-store' });
+          if (response.ok) {
               prevTxHex = await response.text();
               if (prevTxHex && /^[0-9a-fA-F]+$/.test(prevTxHex.trim())) {
                 prevTxHex = prevTxHex.trim();
@@ -218,13 +218,13 @@ export async function hexToPsbt(
             
             // Compare hashes (both should be in internal byte order)
             if (prevTxHash.equals(expectedHash)) {
-              psbt.addInput({
+            psbt.addInput({
                 hash: hashBuffer, // Use internal byte order hash
-                index: vout,
-                nonWitnessUtxo: Buffer.from(prevTxHex, 'hex'),
-              });
+              index: vout,
+              nonWitnessUtxo: Buffer.from(prevTxHex, 'hex'),
+            });
               console.log(`✅ Added input ${i} with nonWitnessUtxo (txid: ${txid}, vout: ${vout})`);
-            } else {
+          } else {
               console.warn(`⚠️ Transaction hash mismatch for input ${i}, using witnessUtxo instead`);
               throw new Error('Hash mismatch');
             }
@@ -545,9 +545,10 @@ export function psbtToHex(signedPsbtOrHex: string): string {
                 return txHex;
               } else if (input0.finalScriptWitness) {
                 // If finalScriptWitness exists, use it directly
-                // IMPORTANT: finalScriptWitness is a Buffer containing the serialized witness stack
-                // We need to decompile it to get the array of Buffers
-                console.log('   ✅ Found finalScriptWitness - decompiling witness stack...');
+                // IMPORTANT: finalScriptWitness is a Buffer containing the witness stack
+                // For Taproot, this is typically just the signature (64 bytes)
+                // The witness format is: [signature] (array of Buffers)
+                console.log('   ✅ Found finalScriptWitness - parsing witness stack...');
                 console.log(`   finalScriptWitness type: ${typeof input0.finalScriptWitness}, isBuffer: ${Buffer.isBuffer(input0.finalScriptWitness)}, length: ${Buffer.isBuffer(input0.finalScriptWitness) ? input0.finalScriptWitness.length : 'N/A'}`);
                 
                 const witnessBuffer = input0.finalScriptWitness;
@@ -555,38 +556,93 @@ export function psbtToHex(signedPsbtOrHex: string): string {
                 // Clone the transaction to avoid modifying the original
                 const signedTx = unsignedTx.clone();
                 
-                // Decompile the witness stack from the serialized Buffer
-                // finalScriptWitness is a Buffer containing the serialized witness stack
-                // We need to use bitcoin.script.decompile() to convert it to an array of Buffers
+                // Parse the witness stack from the Buffer
+                // finalScriptWitness is stored as a Buffer, but we need to parse it as witness data
+                // The format is: compactSize uint (number of witness items) + witness items
                 let witnessBuffers: Buffer[];
                 if (Buffer.isBuffer(witnessBuffer)) {
-                  // Decompile the serialized witness stack
-                  const decompiled = bitcoin.script.decompile(witnessBuffer);
-                  if (!decompiled || decompiled.length === 0) {
-                    throw new Error('Failed to decompile finalScriptWitness - empty result');
-                  }
+                  console.log(`   Parsing witness buffer (${witnessBuffer.length} bytes)...`);
+                  console.log(`   First 20 bytes (hex): ${witnessBuffer.slice(0, 20).toString('hex')}`);
                   
-                  // Convert all elements to Buffers
-                  witnessBuffers = decompiled.map((item: any, idx: number) => {
-                    if (Buffer.isBuffer(item)) {
-                      return item;
-                    } else if (typeof item === 'number') {
-                      // Script opcodes - should not happen in witness, but handle gracefully
-                      throw new Error(`Unexpected opcode ${item} in witness at index ${idx}`);
-                    } else if (typeof item === 'string') {
-                      try {
-                        return Buffer.from(item, 'hex');
-                      } catch (e) {
-                        throw new Error(`Failed to convert witness element ${idx} from hex: ${e}`);
-                      }
-                    } else if (item && typeof item === 'object' && item.length !== undefined) {
-                      // Might be a Uint8Array or similar
-                      return Buffer.from(item);
+                  // Try to parse as witness stack format
+                  // Witness stack format: varint (count) + [varint (length) + data] for each item
+                  try {
+                    let offset = 0;
+                    
+                    // Read compact size uint (number of witness items)
+                    let witnessCount: number;
+                    const firstByte = witnessBuffer[offset];
+                    if (firstByte < 0xfd) {
+                      witnessCount = firstByte;
+                      offset = 1;
+                    } else if (firstByte === 0xfd) {
+                      witnessCount = witnessBuffer.readUInt16LE(1);
+                      offset = 3;
+                    } else if (firstByte === 0xfe) {
+                      witnessCount = witnessBuffer.readUInt32LE(1);
+                      offset = 5;
                     } else {
-                      throw new Error(`Invalid witness element ${idx} type: ${typeof item}`);
+                      witnessCount = Number(witnessBuffer.readBigUInt64LE(1));
+                      offset = 9;
                     }
-                  });
-                  console.log(`   ✅ Decompiled witness: ${witnessBuffers.length} elements, sizes: ${witnessBuffers.map(b => b.length).join(', ')}`);
+                    
+                    console.log(`   Witness count: ${witnessCount}`);
+                    
+                    // Read each witness item
+                    witnessBuffers = [];
+                    for (let i = 0; i < witnessCount; i++) {
+                      // Read compact size uint (item length)
+                      const lengthByte = witnessBuffer[offset];
+                      let itemLength: number;
+                      let itemOffset: number;
+                      
+                      if (lengthByte < 0xfd) {
+                        itemLength = lengthByte;
+                        itemOffset = offset + 1;
+                        offset = itemOffset + itemLength;
+                      } else if (lengthByte === 0xfd) {
+                        itemLength = witnessBuffer.readUInt16LE(offset + 1);
+                        itemOffset = offset + 3;
+                        offset = itemOffset + itemLength;
+                      } else if (lengthByte === 0xfe) {
+                        itemLength = witnessBuffer.readUInt32LE(offset + 1);
+                        itemOffset = offset + 5;
+                        offset = itemOffset + itemLength;
+                      } else {
+                        itemLength = Number(witnessBuffer.readBigUInt64LE(offset + 1));
+                        itemOffset = offset + 9;
+                        offset = itemOffset + itemLength;
+                      }
+                      
+                      // Extract the witness item
+                      const witnessItem = witnessBuffer.slice(itemOffset, itemOffset + itemLength);
+                      witnessBuffers.push(witnessItem);
+                      console.log(`   Witness item ${i}: ${itemLength} bytes`);
+                    }
+                    
+                    console.log(`   ✅ Parsed witness stack: ${witnessBuffers.length} elements, sizes: ${witnessBuffers.map(b => b.length).join(', ')}`);
+                  } catch (parseError: any) {
+                    console.warn(`   ⚠️ Failed to parse witness stack format: ${parseError.message}`);
+                    console.log('   Trying alternative: treating as single signature (Taproot format)...');
+                    
+                    // For Taproot, the witness might just be the signature directly
+                    // If it's 64 bytes (Schnorr signature) or 65 bytes (with sighash), use it directly
+                    if (witnessBuffer.length === 64 || witnessBuffer.length === 65) {
+                      console.log('   ✅ Detected Taproot signature format - using directly');
+                      witnessBuffers = [witnessBuffer];
+                    } else {
+                      // Last resort: try script decompile (might work for some formats)
+                      const decompiled = bitcoin.script.decompile(witnessBuffer);
+                      if (decompiled && decompiled.length > 0) {
+                        witnessBuffers = decompiled.filter((item: any) => Buffer.isBuffer(item)).map((item: any) => Buffer.from(item));
+                        console.log(`   ✅ Decompiled as script: ${witnessBuffers.length} elements`);
+                      } else {
+                        // If all else fails, wrap the entire buffer as a single witness item
+                        console.log('   ⚠️ Using entire buffer as single witness item (fallback)');
+                        witnessBuffers = [witnessBuffer];
+                      }
+                    }
+                  }
                 } else if (Array.isArray(witnessBuffer)) {
                   // If it's already an array (shouldn't happen, but handle it)
                   console.log('   ⚠️ finalScriptWitness is already an array (unexpected)');
@@ -601,7 +657,7 @@ export function psbtToHex(signedPsbtOrHex: string): string {
                 
                 // Validate witness before assigning
                 if (witnessBuffers.length === 0) {
-                  throw new Error('Witness array is empty after decompilation');
+                  throw new Error('Witness array is empty after parsing');
                 }
                 
                 // Assign witness to the transaction input
@@ -678,8 +734,8 @@ export function psbtToHex(signedPsbtOrHex: string): string {
     
     if (isHex && trimmed.length > 200 && !isPsbtHex) {
       // Likely a transaction hex - try to parse it to verify
-      try {
-        const network = getNetwork();
+  try {
+    const network = getNetwork();
         const tx = bitcoin.Transaction.fromHex(trimmed);
         // If parsing succeeds, it's a valid transaction hex
         console.log('ℹ️ Wallet returned signed transaction hex directly (not PSBT)');
@@ -694,15 +750,15 @@ export function psbtToHex(signedPsbtOrHex: string): string {
     try {
       const network = getNetwork();
       const psbt = Psbt.fromBase64(signedPsbtOrHex, { network });
-      
-      // Finalize all inputs
-      psbt.finalizeAllInputs();
-      
-      // Extract the signed transaction
-      const tx = psbt.extractTransaction();
-      
-      // Return as hex
-      return tx.toHex();
+    
+    // Finalize all inputs
+    psbt.finalizeAllInputs();
+    
+    // Extract the signed transaction
+    const tx = psbt.extractTransaction();
+    
+    // Return as hex
+    return tx.toHex();
     } catch (psbtError: any) {
       // If PSBT parsing fails, check if it might be hex after all
       if (isHex && trimmed.length > 100) {
