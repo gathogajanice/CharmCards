@@ -40,6 +40,9 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
   const [commitTxid, setCommitTxid] = useState<string | undefined>();
   const [spellTxid, setSpellTxid] = useState<string | undefined>();
   const [txError, setTxError] = useState<string | undefined>();
+  const [isRetryingUtxos, setIsRetryingUtxos] = useState(false);
+  const [utxoRetryAttempt, setUtxoRetryAttempt] = useState(0);
+  const [utxoErrorStartTime, setUtxoErrorStartTime] = useState<number | null>(null);
   
   const { address, isConnected } = useAppKitAccount();
   const { open: openWallet } = useAppKit();
@@ -179,6 +182,63 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
   const balanceCheck = walletBalance !== null && costBreakdown 
     ? hasSufficientBalance(walletBalance, giftCardAmountCents)
     : null;
+
+  // Manual UTXO retry function
+  const handleRetryUtxos = useCallback(async () => {
+    if (!address || !isConnected) {
+      toast.error('Please connect your wallet first');
+      return;
+    }
+
+    setIsRetryingUtxos(true);
+    setUtxoRetryAttempt(0);
+    setTxError(undefined);
+    
+    const maxRetries = 5;
+    const retryDelays = [10000, 12000, 15000, 15000, 15000]; // 10s, 12s, 15s, 15s, 15s
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      setUtxoRetryAttempt(attempt + 1);
+      toast.info(`Retrying UTXO fetch... (${attempt + 1}/${maxRetries})`);
+      
+      try {
+        const utxos = await getWalletUtxos(address, null);
+        
+        if (utxos.length > 0) {
+          toast.success(`✅ Found ${utxos.length} UTXO${utxos.length > 1 ? 's' : ''}! You can now mint.`);
+          setTxError(undefined);
+          setUtxoErrorStartTime(null);
+          setIsRetryingUtxos(false);
+          setUtxoRetryAttempt(0);
+          return;
+        } else {
+          if (attempt < maxRetries - 1) {
+            const delay = retryDelays[attempt];
+            console.log(`⏳ Waiting ${delay}ms before next retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      } catch (error: any) {
+        console.warn(`UTXO retry attempt ${attempt + 1} failed:`, error.message);
+        if (attempt < maxRetries - 1) {
+          const delay = retryDelays[attempt];
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    
+    // All retries failed
+    const elapsedTime = utxoErrorStartTime 
+      ? Math.floor((Date.now() - utxoErrorStartTime) / 1000)
+      : 0;
+    const elapsedStr = elapsedTime > 60 
+      ? `${Math.floor(elapsedTime / 60)} minute${Math.floor(elapsedTime / 60) > 1 ? 's' : ''} and ${elapsedTime % 60} second${elapsedTime % 60 !== 1 ? 's' : ''}`
+      : `${elapsedTime} second${elapsedTime !== 1 ? 's' : ''}`;
+    
+    toast.error(`UTXOs still not available after ${maxRetries} retries. Please wait longer and try again.`);
+    setTxError(`UTXOs still not available after ${maxRetries} manual retries (${elapsedStr} total).\n\nPlease wait 1-2 minutes for network sync, then try again.`);
+    setIsRetryingUtxos(false);
+  }, [address, isConnected, utxoErrorStartTime]);
 
   const handleMintGiftCard = async () => {
     if (!isConnected || !address) {
@@ -390,9 +450,12 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       // Step 3: Fetch UTXOs with retry logic and exponential backoff
       // New UTXOs from recent transactions may not be immediately available
       console.log('🔄 Fetching UTXOs with retry logic...');
+      const startTime = Date.now();
       let inUtxo: string | null = null;
       let utxos: Array<{ txid: string; vout: number; value: number }> = [];
-      const maxUtxoRetries = 5; // More retries for UTXOs since they take longer to sync
+      const maxUtxoRetries = 8; // Increased retries for UTXOs since they take longer to sync
+      const delays = [2000, 4000, 6000, 8000, 10000, 12000, 15000, 20000]; // Longer delays: 2s, 4s, 6s, 8s, 10s, 12s, 15s, 20s
+      let lastUtxoError: string | null = null;
       
       for (let attempt = 0; attempt < maxUtxoRetries; attempt++) {
         try {
@@ -406,11 +469,11 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             break;
           } else {
             console.warn(`⚠️ No UTXOs found on attempt ${attempt + 1}, but balance exists (${validatedBalance} BTC)`);
+            lastUtxoError = 'No UTXOs found in response';
             
             // If we have balance but no UTXOs, wait for network sync
             if (attempt < maxUtxoRetries - 1) {
-              // Exponential backoff: 1s, 2s, 3s, 4s, 5s
-              const delay = 1000 * (attempt + 1);
+              const delay = delays[attempt];
               console.log(`⏳ Waiting ${delay}ms for network sync before retry...`);
               toast.info(`Waiting for network sync... (${attempt + 1}/${maxUtxoRetries - 1})`);
               await new Promise(resolve => setTimeout(resolve, delay));
@@ -418,10 +481,11 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           }
         } catch (utxoError: any) {
           console.warn(`UTXO fetch attempt ${attempt + 1} failed:`, utxoError.message);
+          lastUtxoError = utxoError.message || 'Unknown error';
           
           // If not the last attempt, wait and retry
           if (attempt < maxUtxoRetries - 1) {
-            const delay = 1000 * (attempt + 1);
+            const delay = delays[attempt];
             console.log(`⏳ Waiting ${delay}ms before retry...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
@@ -430,9 +494,9 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       
       // Final attempt with longer delay if still no UTXOs
       if (!inUtxo && validatedBalance > 0) {
-        console.log('⏳ Final UTXO fetch attempt after extended network sync delay...');
+        console.log('⏳ Final UTXO fetch attempt after extended network sync delay (30s)...');
         toast.info('Waiting for network sync to detect new UTXOs...');
-        await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 seconds
+        await new Promise(resolve => setTimeout(resolve, 30000)); // Wait 30 seconds
         
         try {
           utxos = await getWalletUtxos(address, null);
@@ -440,15 +504,41 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
             console.log(`✅ Got UTXO on final attempt: ${inUtxo}`);
           }
-        } catch (finalError) {
+        } catch (finalError: any) {
           console.warn('Final UTXO fetch attempt failed:', finalError);
+          lastUtxoError = finalError.message || 'Final attempt failed';
         }
       }
       
       // If we still don't have a UTXO, provide detailed error guidance
       if (!inUtxo) {
+        const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+        const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+        const elapsedTimeStr = elapsedMinutes > 0 
+          ? `${elapsedMinutes} minute${elapsedMinutes > 1 ? 's' : ''} and ${elapsedSeconds % 60} second${elapsedSeconds % 60 !== 1 ? 's' : ''}`
+          : `${elapsedSeconds} second${elapsedSeconds !== 1 ? 's' : ''}`;
+        
         setTxStatus('error');
-        const errorMsg = `Unable to fetch UTXOs from wallet. Your wallet shows a balance of ${formatSats(Math.floor(validatedBalance * 100_000_000))}, but UTXO information is not yet available.\n\nThis usually happens when:\n1. You just added bitcoin and the network hasn't synced yet\n2. Your wallet is still syncing with the blockchain\n3. Recent transactions haven't been confirmed\n\nPlease try:\n• Click the "Refresh" button above and wait 10-30 seconds\n• Wait 1-2 minutes for network sync, then try again\n• Refresh the page and reconnect your wallet\n• Ensure your transactions are confirmed (not pending)`;
+        setUtxoErrorStartTime(Date.now());
+        let errorMsg = `Unable to fetch UTXOs from wallet after ${elapsedTimeStr}.\n\n`;
+        errorMsg += `Your wallet shows a balance of ${formatSats(Math.floor(validatedBalance * 100_000_000))}, but UTXO information is not yet available.\n\n`;
+        errorMsg += `This usually happens when:\n`;
+        errorMsg += `1. You just added bitcoin and the network hasn't synced yet\n`;
+        errorMsg += `2. Your wallet is still syncing with the blockchain\n`;
+        errorMsg += `3. Recent transactions haven't been confirmed\n`;
+        if (elapsedSeconds < 120) {
+          errorMsg += `\n⏰ Your transaction is very recent (${elapsedTimeStr} ago). Please wait a bit longer for network sync.\n`;
+        }
+        if (lastUtxoError) {
+          errorMsg += `\nLast error: ${lastUtxoError}\n`;
+        }
+        errorMsg += `\nPlease try:\n`;
+        errorMsg += `• Click "Wait and Retry UTXOs" below to manually retry\n`;
+        errorMsg += `• Click the "Refresh" button above and wait 10-30 seconds\n`;
+        errorMsg += `• Wait 1-2 minutes for network sync, then try again\n`;
+        errorMsg += `• Refresh the page and reconnect your wallet\n`;
+        errorMsg += `• Ensure your transactions are confirmed (not pending)`;
+        
         setTxError(errorMsg);
         toast.error('UTXOs not available yet');
         toast.info('If you just added bitcoin, please wait for network sync (10-30 seconds) and click Refresh, then try again.');
@@ -731,6 +821,45 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
                   spellTxid={spellTxid}
                   error={txError}
                 />
+                {/* Manual UTXO Retry Button - Show when error is UTXO-related */}
+                {txStatus === 'error' && txError && txError.includes('Unable to fetch UTXOs') && (
+                  <div className="mt-4 p-4 bg-background border border-border rounded-[12px]">
+                    <div className="flex items-center justify-between mb-3">
+                      <div>
+                        <p className="text-[14px] font-semibold text-foreground mb-1">
+                          UTXOs Not Available Yet
+                        </p>
+                        {utxoRetryAttempt > 0 && (
+                          <p className="text-[12px] text-foreground/60">
+                            Retry attempt {utxoRetryAttempt} in progress...
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleRetryUtxos}
+                      disabled={isRetryingUtxos || !isConnected || !address}
+                      className="w-full h-10 px-4 rounded-lg bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                    >
+                      {isRetryingUtxos ? (
+                        <>
+                          <Loader className="w-4 h-4 animate-spin" />
+                          <span>Retrying UTXOs...</span>
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-4 h-4" />
+                          <span>Wait and Retry UTXOs</span>
+                        </>
+                      )}
+                    </button>
+                    {utxoErrorStartTime && (
+                      <p className="mt-2 text-[11px] text-foreground/50 text-center">
+                        Waiting since {Math.floor((Date.now() - utxoErrorStartTime) / 1000)}s ago
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

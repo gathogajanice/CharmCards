@@ -11,6 +11,7 @@ const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
 /**
  * GET /api/utxo/:address
  * Proxy UTXO fetching from memepool.space to bypass CORS
+ * Includes retry logic for better reliability on testnet4
  */
 router.get('/:address', async (req: Request, res: Response) => {
   try {
@@ -20,40 +21,85 @@ router.get('/:address', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Address is required' });
     }
 
-    // Fetch UTXOs from memepool.space API
+    // Fetch UTXOs from memepool.space API with retry logic
     const utxoUrl = `${MEMEPOOL_BASE_URL}/api/address/${address}/utxo`;
+    const maxRetries = 3;
+    const timeout = NETWORK === 'testnet4' ? 20000 : 10000; // 20s for testnet4, 10s for others
     
-    console.log(`Fetching UTXOs for address ${address} from ${utxoUrl}`);
+    console.log(`Fetching UTXOs for address ${address} from ${utxoUrl} (network: ${NETWORK})`);
     
-    const response = await axios.get(utxoUrl, {
-      timeout: 10000, // 10 second timeout
-    });
+    let lastError: any = null;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        if (attempt > 0) {
+          const delay = 2000 * attempt; // 2s, 4s delays
+          console.log(`Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms delay...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        const response = await axios.get(utxoUrl, {
+          timeout,
+          validateStatus: (status) => status < 500, // Don't throw on 4xx errors
+        });
 
-    if (response.data && Array.isArray(response.data)) {
-      // Map to consistent format
-      const utxos = response.data.map((utxo: any) => ({
-        txid: utxo.txid || utxo.tx_hash,
-        vout: utxo.vout !== undefined ? utxo.vout : (utxo.index !== undefined ? utxo.index : 0),
-        value: utxo.value || utxo.amount || 0,
-      }));
+        if (response.status === 200 && response.data && Array.isArray(response.data)) {
+          // Map to consistent format
+          const utxos = response.data.map((utxo: any) => ({
+            txid: utxo.txid || utxo.tx_hash,
+            vout: utxo.vout !== undefined ? utxo.vout : (utxo.index !== undefined ? utxo.index : 0),
+            value: utxo.value || utxo.amount || 0,
+          }));
 
-      console.log(`Fetched ${utxos.length} UTXOs for address ${address}`);
-      return res.json(utxos);
+          console.log(`✅ Fetched ${utxos.length} UTXOs for address ${address}${attempt > 0 ? ` (on retry ${attempt})` : ''}`);
+          return res.json(utxos);
+        } else if (response.status === 404) {
+          // Address not found or no UTXOs - return empty array (not an error)
+          console.log(`Address ${address} has no UTXOs (404)`);
+          return res.json([]);
+        } else {
+          // Other 4xx errors - log and retry if not last attempt
+          console.warn(`UTXO fetch returned status ${response.status} on attempt ${attempt + 1}`);
+          lastError = { status: response.status, data: response.data };
+          if (attempt < maxRetries - 1) {
+            continue; // Retry
+          }
+        }
+      } catch (error: any) {
+        lastError = error;
+        console.warn(`UTXO fetch attempt ${attempt + 1} failed:`, error.message);
+        
+        // If it's a network error and not the last attempt, retry
+        if (attempt < maxRetries - 1 && (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || !error.response)) {
+          continue; // Retry
+        }
+        
+        // If it's the last attempt or a non-retryable error, break
+        break;
+      }
     }
-
-    return res.json([]);
-  } catch (error: any) {
-    console.error('Error fetching UTXOs:', error.message);
     
-    if (error.response) {
-      return res.status(error.response.status).json({
-        error: error.response.data?.error || 'Failed to fetch UTXOs',
-        status: error.response.status,
+    // All retries failed
+    console.error(`Failed to fetch UTXOs after ${maxRetries} attempts for address ${address}`);
+    
+    if (lastError?.response) {
+      return res.status(lastError.response.status).json({
+        error: lastError.response.data?.error || 'Failed to fetch UTXOs',
+        status: lastError.response.status,
+        details: lastError.response.data,
       });
     }
     
     return res.status(500).json({
-      error: 'Failed to fetch UTXOs from memepool.space',
+      error: 'Failed to fetch UTXOs from memepool.space after retries',
+      message: lastError?.message || 'Unknown error',
+      network: NETWORK,
+    });
+  } catch (error: any) {
+    console.error('Unexpected error fetching UTXOs:', error.message);
+    
+    return res.status(500).json({
+      error: 'Unexpected error fetching UTXOs',
       message: error.message,
     });
   }

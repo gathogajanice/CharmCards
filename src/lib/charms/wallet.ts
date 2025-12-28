@@ -970,8 +970,78 @@ export async function waitForMempoolAcceptance(
 }
 
 /**
+ * Broadcast transaction using wallet's built-in method
+ * According to Charms docs: "Most wallet libraries offer methods for submitting transaction packages"
+ * This is more direct and doesn't require third-party services
+ */
+async function broadcastTransactionViaWallet(signedTxHex: string): Promise<string | null> {
+  if (typeof window === 'undefined') {
+    return null; // Not in browser environment
+  }
+
+  try {
+    // Try Unisat wallet first
+    if ((window as any).unisat) {
+      const unisat = (window as any).unisat;
+      
+      // Try pushTx method (most common)
+      if (typeof unisat.pushTx === 'function') {
+        console.log('📤 Broadcasting transaction via Unisat pushTx...');
+        const txid = await unisat.pushTx(signedTxHex.trim());
+        console.log('✅ Transaction broadcast via Unisat pushTx, txid:', txid);
+        return typeof txid === 'string' ? txid.trim() : String(txid).trim();
+      }
+      
+      // Try sendRawTransaction as alternative
+      if (typeof unisat.sendRawTransaction === 'function') {
+        console.log('📤 Broadcasting transaction via Unisat sendRawTransaction...');
+        const txid = await unisat.sendRawTransaction(signedTxHex.trim());
+        console.log('✅ Transaction broadcast via Unisat sendRawTransaction, txid:', txid);
+        return typeof txid === 'string' ? txid.trim() : String(txid).trim();
+      }
+    }
+
+    // Try Xverse wallet
+    if ((window as any).XverseProviders) {
+      const xverse = (window as any).XverseProviders?.BitcoinProvider;
+      if (xverse && typeof xverse.sendBitcoin === 'function') {
+        console.log('📤 Broadcasting transaction via Xverse...');
+        // Xverse might have different method signature
+        try {
+          const txid = await xverse.sendBitcoin(signedTxHex.trim());
+          console.log('✅ Transaction broadcast via Xverse, txid:', txid);
+          return typeof txid === 'string' ? txid.trim() : String(txid).trim();
+        } catch (e) {
+          console.warn('Xverse sendBitcoin failed, might not support raw hex:', e);
+        }
+      }
+    }
+
+    // Try Leather wallet
+    if ((window as any).btc || (window as any).hiroWalletProvider) {
+      const leather = (window as any).btc || (window as any).hiroWalletProvider;
+      if (leather && typeof leather.sendTransaction === 'function') {
+        console.log('📤 Broadcasting transaction via Leather...');
+        try {
+          const txid = await leather.sendTransaction(signedTxHex.trim());
+          console.log('✅ Transaction broadcast via Leather, txid:', txid);
+          return typeof txid === 'string' ? txid.trim() : String(txid).trim();
+        } catch (e) {
+          console.warn('Leather sendTransaction failed, might not support raw hex:', e);
+        }
+      }
+    }
+
+    return null; // No wallet method available
+  } catch (error: any) {
+    console.warn('Wallet broadcasting failed:', error.message);
+    return null; // Return null to trigger fallback
+  }
+}
+
+/**
  * Broadcast a signed transaction to Bitcoin Testnet4
- * Uses memepool.space /tx/push endpoint
+ * Tries wallet's built-in method first, then falls back to server-side proxy
  * 
  * Validates transaction format before broadcasting as per Charms documentation:
  * https://docs.charms.dev/guides/wallet-integration/transactions/broadcasting/
@@ -985,13 +1055,21 @@ export async function broadcastTransaction(signedTxHex: string): Promise<string>
       throw new Error(`Transaction validation failed: ${validation.error}`);
     }
 
-    // Use memepool.space /tx/push endpoint for broadcasting
-    // Based on: https://memepool.space/testnet4/tx/push
-    const broadcastUrl = NETWORK === 'testnet4' 
-      ? 'https://memepool.space/testnet4/tx/push'
-      : 'https://memepool.space/tx/push';
+    // Step 1: Try wallet's built-in broadcasting method first
+    // This is more direct and doesn't require third-party services
+    console.log('🔍 Attempting to broadcast via wallet built-in method...');
+    const walletTxid = await broadcastTransactionViaWallet(signedTxHex);
     
-    console.log('Broadcasting transaction to:', broadcastUrl);
+    if (walletTxid) {
+      console.log('✅ Transaction broadcast successfully via wallet, txid:', walletTxid);
+      return walletTxid;
+    }
+
+    // Step 2: Fallback to server-side proxy if wallet method unavailable
+    console.log('⚠️ Wallet broadcasting not available, falling back to server-side proxy...');
+    const broadcastUrl = `${API_URL}/api/broadcast/tx`;
+    
+    console.log('Broadcasting transaction via server proxy:', broadcastUrl);
     
     const response = await fetch(broadcastUrl, {
       method: 'POST',
@@ -1002,14 +1080,21 @@ export async function broadcastTransaction(signedTxHex: string): Promise<string>
     });
     
     if (!response.ok) {
-      const error = await response.text();
-      console.error('Broadcast failed:', response.status, error);
-      throw new Error(`Broadcast failed: ${error}`);
+      let errorMessage: string;
+      try {
+        const errorData = await response.json();
+        errorMessage = errorData.error || `Broadcast failed with status ${response.status}`;
+      } catch {
+        const errorText = await response.text();
+        errorMessage = errorText || `Broadcast failed with status ${response.status}`;
+      }
+      console.error('Broadcast failed:', response.status, errorMessage);
+      throw new Error(`Broadcast failed: ${errorMessage}`);
     }
     
     const txid = await response.text();
     const trimmedTxid = txid.trim();
-    console.log('Transaction broadcast successfully, txid:', trimmedTxid);
+    console.log('✅ Transaction broadcast successfully via server proxy, txid:', trimmedTxid);
     return trimmedTxid;
   } catch (error: any) {
     console.error('Broadcast error:', error);
@@ -1048,33 +1133,98 @@ export async function broadcastSpellTransactions(
       throw new Error(`Spell transaction validation failed: ${spellValidation.error}`);
     }
 
-    // Step 2: Broadcast commit transaction first
-    // The commit transaction creates the Taproot output that the spell transaction spends
-    console.log('📤 Broadcasting commit transaction...');
-    const commitTxid = await broadcastTransaction(commitTxHex);
-    console.log(`✅ Commit transaction broadcast: ${commitTxid}`);
-
-    // Step 3: Wait for commit transaction to be accepted into mempool
-    // Per Charms docs: "Both transactions must be accepted into the mempool to ensure proper processing"
-    // The spell transaction depends on the commit transaction being in mempool
-    console.log('⏳ Waiting for commit transaction to be accepted into mempool...');
-    const commitAccepted = await waitForMempoolAcceptance(commitTxid, 30000, 1000);
+    // Step 2: Try wallet-based broadcasting first, then fallback to server proxy
+    // Per Charms docs: "Most wallet libraries offer methods for submitting transaction packages"
+    console.log('📤 Attempting to broadcast transaction package via wallet...');
     
-    if (!commitAccepted) {
-      throw new Error(
-        `Commit transaction ${commitTxid} was not accepted into mempool within timeout. ` +
-        `The spell transaction cannot be broadcast until the commit transaction is in mempool. ` +
-        `Please check the transaction status and try again.`
-      );
+    let commitTxid: string;
+    let spellTxid: string;
+    let usedWallet = false;
+
+    // Try wallet method for commit transaction
+    const walletCommitTxid = await broadcastTransactionViaWallet(commitTxHex);
+    
+    if (walletCommitTxid) {
+      commitTxid = walletCommitTxid;
+      usedWallet = true;
+      console.log(`✅ Commit transaction broadcast via wallet: ${commitTxid}`);
+      
+      // Wait for commit transaction to be accepted into mempool
+      // Per Charms docs: "The commit transaction must be in mempool before the spell transaction can be accepted"
+      console.log('⏳ Waiting for commit transaction to be accepted into mempool...');
+      const commitAccepted = await waitForMempoolAcceptance(commitTxid, 30000, 1000);
+      
+      if (!commitAccepted) {
+        console.warn(`⚠️ Warning: Commit transaction ${commitTxid} was not accepted into mempool within timeout`);
+        console.warn('⚠️ Proceeding with spell broadcast anyway - it may fail if commit is not in mempool');
+      } else {
+        console.log(`✅ Commit transaction ${commitTxid} confirmed in mempool - safe to broadcast spell transaction`);
+      }
+      
+      // Try wallet method for spell transaction
+      const walletSpellTxid = await broadcastTransactionViaWallet(spellTxHex);
+      
+      if (walletSpellTxid) {
+        spellTxid = walletSpellTxid;
+        console.log(`✅ Spell transaction broadcast via wallet: ${spellTxid}`);
+        console.log(`✅ Package broadcast successful via wallet: commit=${commitTxid}, spell=${spellTxid}`);
+      } else {
+        // Commit was broadcast via wallet, but spell needs server fallback
+        console.log('⚠️ Spell transaction wallet broadcast not available, using server proxy...');
+        spellTxid = await broadcastTransaction(spellTxHex);
+        console.log(`✅ Package broadcast (mixed): commit=${commitTxid} (wallet), spell=${spellTxid} (server)`);
+      }
+    } else {
+      // Wallet method not available, use server-side proxy for package broadcasting
+      console.log('⚠️ Wallet broadcasting not available, using server-side proxy for package...');
+      const packageUrl = `${API_URL}/api/broadcast/package`;
+      
+      const response = await fetch(packageUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          commitTx: commitTxHex.trim(),
+          spellTx: spellTxHex.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        let errorMessage: string;
+        let errorDetails: any = null;
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorData.message || `Package broadcast failed with status ${response.status}`;
+          errorDetails = errorData;
+          console.error('Package broadcast failed - Full error response:', errorData);
+        } catch {
+          const errorText = await response.text();
+          errorMessage = errorText || `Package broadcast failed with status ${response.status}`;
+          console.error('Package broadcast failed - Error text:', errorText);
+        }
+        console.error('Package broadcast failed:', response.status, errorMessage);
+        console.error('Error details:', errorDetails);
+        
+        // Include error details in the error message for better debugging
+        const fullErrorMessage = errorDetails 
+          ? `Failed to broadcast transaction package: ${errorMessage} (Status: ${response.status}, Type: ${errorDetails.errorType || 'unknown'}, Code: ${errorDetails.errorCode || 'none'})`
+          : `Failed to broadcast transaction package: ${errorMessage}`;
+        throw new Error(fullErrorMessage);
+      }
+
+      const result = await response.json();
+      commitTxid = result.commitTxid;
+      spellTxid = result.spellTxid;
+
+      if (!commitTxid || !spellTxid) {
+        throw new Error('Invalid response from package broadcast endpoint');
+      }
+
+      console.log(`✅ Package broadcast successful via server proxy: commit=${commitTxid}, spell=${spellTxid}`);
     }
 
-    // Step 4: Broadcast spell transaction
-    // Now that commit transaction is in mempool, we can broadcast the spell transaction
-    console.log('📤 Broadcasting spell transaction...');
-    const spellTxid = await broadcastTransaction(spellTxHex);
-    console.log(`✅ Spell transaction broadcast: ${spellTxid}`);
-
-    // Step 5: Verify both transactions are in mempool
+    // Step 3: Verify both transactions are in mempool (optional but recommended)
     // Per Charms docs: "Both transactions must be accepted into the mempool"
     console.log('🔍 Verifying both transactions are in mempool...');
     const commitInMempool = await checkTransactionInMempool(commitTxid);
@@ -1082,6 +1232,12 @@ export async function broadcastSpellTransactions(
 
     if (!commitInMempool) {
       console.warn(`⚠️ Warning: Commit transaction ${commitTxid} not found in mempool after broadcast`);
+      // Wait a bit and check again
+      console.log('⏳ Waiting for commit transaction to appear in mempool...');
+      const commitAccepted = await waitForMempoolAcceptance(commitTxid, 10000, 500);
+      if (!commitAccepted) {
+        console.warn(`⚠️ Warning: Commit transaction ${commitTxid} still not found in mempool`);
+      }
     }
 
     if (!spellInMempool) {
@@ -1093,7 +1249,10 @@ export async function broadcastSpellTransactions(
       }
     }
 
-    if (commitInMempool && (spellInMempool || await checkTransactionInMempool(spellTxid))) {
+    const finalCommitCheck = await checkTransactionInMempool(commitTxid);
+    const finalSpellCheck = await checkTransactionInMempool(spellTxid);
+
+    if (finalCommitCheck && finalSpellCheck) {
       console.log('✅ Both transactions successfully accepted into mempool');
     } else {
       console.warn('⚠️ One or both transactions may not be in mempool. Please check transaction status.');
