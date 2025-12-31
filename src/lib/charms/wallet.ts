@@ -1543,6 +1543,82 @@ export async function getWalletBalance(
  * Get available UTXOs from connected wallet
  * First tries wallet APIs, then falls back to memepool.space API
  */
+/**
+ * Filter UTXOs to only include those that are already synced by the node
+ * and optionally validate they belong to a specific address
+ * 
+ * @param utxos Array of UTXOs to filter
+ * @param expectedAddress Optional address to validate UTXOs belong to
+ * @param nodeBlocks Current block height of the node (if available)
+ * @returns Filtered array of UTXOs that are synced and valid
+ */
+export async function filterSyncedUtxos(
+  utxos: Array<{ txid: string; vout: number; value: number }>,
+  expectedAddress?: string,
+  nodeBlocks?: number
+): Promise<{
+  syncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number }>;
+  unsyncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; blocksNeeded?: number }>;
+  unconfirmedUtxos: Array<{ txid: string; vout: number; value: number }>;
+}> {
+  const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
+  const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
+    ? 'https://memepool.space/testnet4'
+    : 'https://memepool.space';
+
+  const syncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number }> = [];
+  const unsyncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; blocksNeeded?: number }> = [];
+  const unconfirmedUtxos: Array<{ txid: string; vout: number; value: number }> = [];
+
+  // If no node blocks info, assume all are usable (will be checked later)
+  const hasNodeInfo = nodeBlocks !== undefined && nodeBlocks > 0;
+
+  for (const utxo of utxos) {
+    try {
+      // Fetch transaction details to get block height
+      const txUrl = `${MEMEPOOL_BASE_URL}/api/tx/${utxo.txid}`;
+      const response = await fetch(txUrl, { 
+        signal: AbortSignal.timeout(5000) // 5 second timeout
+      });
+      
+      if (response.ok) {
+        const txData = await response.json();
+        const blockHeight = txData?.status?.block_height;
+        
+        if (blockHeight !== undefined) {
+          // Transaction is confirmed
+          if (hasNodeInfo && nodeBlocks! >= blockHeight) {
+            // Node has synced this block
+            syncedUtxos.push({ ...utxo, blockHeight });
+          } else if (hasNodeInfo) {
+            // Node hasn't synced this block yet
+            unsyncedUtxos.push({ 
+              ...utxo, 
+              blockHeight, 
+              blocksNeeded: blockHeight - nodeBlocks! 
+            });
+          } else {
+            // No node info, assume it's usable
+            syncedUtxos.push({ ...utxo, blockHeight });
+          }
+        } else {
+          // Transaction is unconfirmed
+          unconfirmedUtxos.push(utxo);
+        }
+      } else {
+        // Transaction not found or error - assume unconfirmed
+        unconfirmedUtxos.push(utxo);
+      }
+    } catch (error: any) {
+      // If we can't check, assume it's unconfirmed (safer to include)
+      console.warn(`Could not check block height for UTXO ${utxo.txid}:${utxo.vout}:`, error.message);
+      unconfirmedUtxos.push(utxo);
+    }
+  }
+
+  return { syncedUtxos, unsyncedUtxos, unconfirmedUtxos };
+}
+
 export async function getWalletUtxos(
   address: string,
   wallet: any // Optional wallet parameter

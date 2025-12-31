@@ -76,7 +76,9 @@ router.post('/mint', async (req, res) => {
             });
         }
         // Validate UTXO exists and is spendable
+        console.log(`⏳ Step 1/5: Validating UTXO ${inUtxo}...`);
         const utxoValidation = await (0, utxo_validator_1.validateUTXOExists)(inUtxo);
+        console.log(`✅ Step 1/5: UTXO validation complete`);
         if (!utxoValidation.valid || !utxoValidation.utxo) {
             return res.status(400).json({
                 error: utxoValidation.error || 'UTXO validation failed',
@@ -101,6 +103,7 @@ router.post('/mint', async (req, res) => {
                 shortfall: valueCheck.shortfall,
             });
         }
+        console.log(`⏳ Step 2/5: Creating spell YAML...`);
         const spellYaml = await charmsService.createMintSpell({
             inUtxo,
             recipientAddress,
@@ -109,23 +112,31 @@ router.post('/mint', async (req, res) => {
             initialAmount: validatedAmount,
             expirationDate: validatedExpiration,
         });
+        console.log(`✅ Step 2/5: Spell YAML created`);
         // Try to validate spell (optional - Prover API will also validate)
         // If validation fails, we'll still try to generate proof (Prover API will catch real issues)
+        console.log(`⏳ Step 3/5: Validating spell structure...`);
         try {
             const isValid = await charmsService.checkSpell(spellYaml);
             if (!isValid) {
                 console.warn('⚠️ Spell validation failed, but proceeding anyway (Prover API will validate)');
             }
+            else {
+                console.log(`✅ Step 3/5: Spell validation passed`);
+            }
         }
         catch (validationError) {
             console.warn('⚠️ Spell validation error (skipping):', validationError.message);
             console.warn('   Proceeding anyway - Prover API will validate the spell');
+            console.log(`⏭️  Step 3/5: Skipped (will be validated by Prover API)`);
         }
         // Generate proof with app binary and optional mock mode
         // Note: If build fails, we'll try without app_bins (Prover API may work in mock mode)
+        console.log(`⏳ Step 4/5: Building app binary (if needed)...`);
         let appBin;
         try {
             appBin = await charmsService.buildApp();
+            console.log(`✅ Step 4/5: App binary built`);
         }
         catch (buildError) {
             const mockMode = process.env.MOCK_MODE === 'true';
@@ -160,26 +171,53 @@ router.post('/mint', async (req, res) => {
                 ? 'https://memepool.space/testnet4'
                 : 'https://memepool.space';
             const txHexUrl = `${MEMEPOOL_BASE_URL}/api/tx/${txid}/hex`;
-            console.log(`📥 Fetching previous transaction hex from: ${txHexUrl}`);
-            const txHexResponse = await axios_1.default.get(txHexUrl, {
-                timeout: 15000,
-                headers: {
-                    'Accept': 'text/plain', // memepool.space returns hex as plain text
+            console.log(`⏳ Step 4.5/5: Fetching previous transaction hex from: ${txHexUrl}`);
+            // Add retry logic for fetching previous transaction hex (can fail due to network issues)
+            const maxRetries = 3;
+            let lastError = null;
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    if (attempt > 0) {
+                        const delay = 2000 * attempt; // 2s, 4s delays
+                        console.log(`   Retry attempt ${attempt + 1}/${maxRetries} after ${delay}ms delay...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    }
+                    const txHexResponse = await axios_1.default.get(txHexUrl, {
+                        timeout: 15000,
+                        headers: {
+                            'Accept': 'text/plain', // memepool.space returns hex as plain text
+                        }
+                    });
+                    // memepool.space returns hex as plain text (not JSON)
+                    prevTxHex = typeof txHexResponse.data === 'string'
+                        ? txHexResponse.data.trim()
+                        : String(txHexResponse.data).trim();
+                    if (prevTxHex && prevTxHex.length > 0) {
+                        // Validate it looks like hex
+                        if (!/^[0-9a-fA-F]+$/.test(prevTxHex)) {
+                            throw new Error(`Invalid hex format: ${prevTxHex.substring(0, 50)}...`);
+                        }
+                        console.log(`✅ Step 4.5/5: Fetched previous transaction hex: ${prevTxHex.length} chars, starts with ${prevTxHex.substring(0, 16)}...${attempt > 0 ? ` (on retry ${attempt})` : ''}`);
+                        break; // Success, exit retry loop
+                    }
+                    else {
+                        throw new Error('Empty transaction hex response');
+                    }
                 }
-            });
-            // memepool.space returns hex as plain text (not JSON)
-            prevTxHex = typeof txHexResponse.data === 'string'
-                ? txHexResponse.data.trim()
-                : String(txHexResponse.data).trim();
-            if (prevTxHex && prevTxHex.length > 0) {
-                // Validate it looks like hex
-                if (!/^[0-9a-fA-F]+$/.test(prevTxHex)) {
-                    throw new Error(`Invalid hex format: ${prevTxHex.substring(0, 50)}...`);
+                catch (fetchError) {
+                    lastError = fetchError;
+                    console.warn(`   Fetch attempt ${attempt + 1}/${maxRetries} failed: ${fetchError.message}`);
+                    // If it's a network error and not the last attempt, retry
+                    if (attempt < maxRetries - 1 && (fetchError.code === 'ECONNABORTED' || fetchError.code === 'ETIMEDOUT' || !fetchError.response)) {
+                        continue; // Retry
+                    }
+                    // If it's the last attempt or a non-retryable error, break
+                    break;
                 }
-                console.log(`✅ Fetched previous transaction hex: ${prevTxHex.length} chars, starts with ${prevTxHex.substring(0, 16)}...`);
             }
-            else {
-                throw new Error('Empty transaction hex response');
+            // Check if we successfully fetched the hex
+            if (!prevTxHex || prevTxHex.length === 0) {
+                throw lastError || new Error('Failed to fetch previous transaction hex after retries');
             }
         }
         catch (prevTxError) {
@@ -204,26 +242,39 @@ router.post('/mint', async (req, res) => {
         });
     }
     catch (error) {
-        console.error('Error minting gift card:', error);
+        console.error('❌ Error minting gift card:', error);
         // Provide detailed error messages for common issues
         let errorMessage = error.message || 'Failed to mint gift card';
         let statusCode = 500;
-        // Handle specific error types
-        if (error.message?.includes('UTXO')) {
+        // Handle specific error types with improved messages
+        if (error.message?.includes('timeout') || error.message?.includes('timed out')) {
+            statusCode = 504; // Gateway timeout
+            errorMessage = `Operation timed out: ${error.message}. Proof generation may be taking longer than expected. Please try again.`;
+        }
+        else if (error.message?.includes('UTXO')) {
             statusCode = 400; // Bad request for UTXO issues
+            errorMessage = `UTXO validation failed: ${error.message}`;
         }
         else if (error.message?.includes('Invalid') || error.message?.includes('Missing')) {
             statusCode = 400;
+            errorMessage = `Validation error: ${error.message}`;
         }
-        else if (error.message?.includes('Prover API')) {
+        else if (error.message?.includes('Prover API') || error.message?.includes('proof generation')) {
             statusCode = 502; // Bad gateway for Prover API issues
+            errorMessage = `Proof generation failed: ${error.message}. The Prover API may be experiencing issues. Please try again in a few moments.`;
+        }
+        else if (error.message?.includes('previous transaction hex')) {
+            statusCode = 502; // Bad gateway - external API issue
+            errorMessage = `Failed to fetch transaction data: ${error.message}. The memepool.space API may be slow or unavailable. Please try again.`;
         }
         else if (error.response?.status) {
             statusCode = error.response.status;
         }
+        console.error(`   Status: ${statusCode}, Error: ${errorMessage}`);
         res.status(statusCode).json({
             error: errorMessage,
             success: false,
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined,
         });
     }
 });

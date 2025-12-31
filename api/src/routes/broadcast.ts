@@ -8,13 +8,6 @@ const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
   ? 'https://memepool.space/testnet4'
   : 'https://memepool.space';
 
-// CryptoAPIs for broadcasting (requires API key)
-// Supports testnet (may work for testnet4 if they treat it as testnet)
-// Read API key dynamically to ensure it's available after dotenv.config() runs
-const getCryptoApisApiKey = (): string | undefined => {
-  return process.env.CRYPTOAPIS_API_KEY?.trim();
-};
-
 // Bitcoin Core RPC configuration for package broadcasting
 // Per Charms docs: "This is functionally equivalent to bitcoin-cli submitpackage command"
 interface BitcoinRpcConfig {
@@ -63,19 +56,6 @@ export const getBitcoinRpcConfig = (): BitcoinRpcConfig | null => {
   };
 };
 
-// CryptoAPIs base URL - use v2 broadcast-transactions endpoint format
-// Documentation: https://developers.cryptoapis.io/v-2.2024-12-12-175/RESTapis/broadcast-locally-sign-transactions/broadcast-locally-signed-transaction/post
-const CRYPTOAPIS_BASE_URL_V2 = 'https://rest.cryptoapis.io/v2/broadcast-transactions';
-const CRYPTOAPIS_BASE_URL = 'https://rest.cryptoapis.io/v2/broadcast-transactions'; // Keep v2 as primary
-// Network mapping: testnet4 → testnet, testnet → testnet, mainnet → mainnet
-const getCryptoApisNetwork = (network: string): string => {
-  if (network === 'testnet4' || network === 'testnet' || network === 'testnet3') {
-    return 'testnet';
-  }
-  return 'mainnet';
-};
-
-
 /**
  * Bitcoin Core RPC client for package broadcasting
  * Implements JSON-RPC 2.0 protocol for Bitcoin Core's submitpackage method
@@ -93,6 +73,19 @@ async function callBitcoinRpc(
   method: string,
   params: any[],
   config: BitcoinRpcConfig
+): Promise<BitcoinRpcResponse> {
+  return callBitcoinRpcWithTimeout(method, params, config, 60000);
+}
+
+/**
+ * Call Bitcoin RPC with configurable timeout
+ * Useful for health checks that may need longer timeouts during sync
+ */
+async function callBitcoinRpcWithTimeout(
+  method: string,
+  params: any[],
+  config: BitcoinRpcConfig,
+  timeoutMs: number = 60000
 ): Promise<BitcoinRpcResponse> {
   const rpcUrl = config.url;
   const rpcId = Math.floor(Math.random() * 1000000);
@@ -117,7 +110,7 @@ async function callBitcoinRpc(
   try {
     const response = await axios.post(rpcUrl, requestBody, {
       headers,
-      timeout: 60000, // 60 second timeout
+      timeout: timeoutMs,
       validateStatus: (status) => status < 500, // Don't throw on 4xx errors
     });
 
@@ -170,6 +163,7 @@ async function callBitcoinRpc(
  */
 export async function getBitcoinNodeHealth(config: BitcoinRpcConfig): Promise<{
   connected: boolean;
+  loading?: boolean; // Node is connected but still loading block index
   blockchain?: {
     chain: string;
     blocks: number;
@@ -188,13 +182,15 @@ export async function getBitcoinNodeHealth(config: BitcoinRpcConfig): Promise<{
   error?: string;
 }> {
   try {
-    // Get blockchain info
-    const blockchainInfo = await callBitcoinRpc('getblockchaininfo', [], config);
-    const networkInfo = await callBitcoinRpc('getnetworkinfo', [], config);
-    const mempoolInfo = await callBitcoinRpc('getmempoolinfo', [], config);
+    // Get blockchain info with longer timeout for syncing nodes
+    // Use a helper function with extended timeout for health checks
+    const blockchainInfo = await callBitcoinRpcWithTimeout('getblockchaininfo', [], config, 120000);
+    const networkInfo = await callBitcoinRpcWithTimeout('getnetworkinfo', [], config, 120000);
+    const mempoolInfo = await callBitcoinRpcWithTimeout('getmempoolinfo', [], config, 120000);
 
     return {
       connected: true,
+      loading: false,
       blockchain: {
         chain: blockchainInfo.result?.chain || 'unknown',
         blocks: blockchainInfo.result?.blocks || 0,
@@ -212,9 +208,88 @@ export async function getBitcoinNodeHealth(config: BitcoinRpcConfig): Promise<{
       },
     };
   } catch (error: any) {
+    // Error -28 means "Loading block index" - RPC is working but node is still initializing
+    if (error.message?.includes('error (-28)') || error.message?.includes('Loading block index')) {
+      return {
+        connected: true, // RPC is connected and responding
+        loading: true,   // But node is still loading
+        error: 'Node is loading block index. RPC is available but not ready for all operations yet.',
+      };
+    }
+    // Handle timeout errors specifically
+    if (error.message?.includes('timeout') || error.code === 'ECONNABORTED' || error.message?.includes('timed out')) {
+      return {
+        connected: false,
+        loading: true, // Node might be syncing/loading
+        error: 'Bitcoin RPC request timed out. The node may be overloaded or still syncing. This is common during initial block download. Check node status: ./check-bitcoin-rpc.sh or tail -f ~/.bitcoin/testnet4/debug.log',
+      };
+    }
     return {
       connected: false,
       error: error.message || 'Unknown error checking node health',
+    };
+  }
+}
+
+/**
+ * Check if Bitcoin Core is ready for broadcasting
+ * Node is ready if:
+ * - RPC is connected and not loading block index
+ * - Node is fully synced OR has connections and sufficient verification progress
+ * 
+ * @param config Bitcoin RPC configuration (optional, will fetch if not provided)
+ * @returns Object indicating if Bitcoin Core is ready for broadcasting
+ */
+export async function isBitcoinCoreReady(config?: BitcoinRpcConfig): Promise<{
+  ready: boolean;
+  reason?: string;
+}> {
+  const rpcConfig = config || getBitcoinRpcConfig();
+  
+  if (!rpcConfig) {
+    return {
+      ready: false,
+      reason: 'Bitcoin Core RPC not configured',
+    };
+  }
+
+  try {
+    const health = await getBitcoinNodeHealth(rpcConfig);
+    
+    // Not connected or still loading block index
+    if (!health.connected || health.loading) {
+      return {
+        ready: false,
+        reason: health.error || 'Bitcoin Core RPC not connected or still loading',
+      };
+    }
+
+    // Check if node is synced or has sufficient progress
+    const isSynced = !health.blockchain?.initialBlockDownload;
+    const hasConnections = (health.network?.connections || 0) > 0;
+    const verificationProgress = health.blockchain?.verificationProgress || 0;
+    const blocks = health.blockchain?.blocks || 0;
+    
+    // Ready if fully synced OR (has connections AND verification progress > 30% AND has synced at least 1000 blocks)
+    // Lowered threshold from 50% to 30% and added minimum block requirement for syncing nodes
+    // This allows nodes that are actively syncing to process transactions sooner
+    if (isSynced || (hasConnections && verificationProgress > 0.3 && blocks > 1000)) {
+      return {
+        ready: true,
+        reason: isSynced 
+          ? 'Bitcoin Core is fully synced and ready'
+          : `Bitcoin Core is syncing (${(verificationProgress * 100).toFixed(1)}% complete, ${blocks.toLocaleString()} blocks) but has connections and can process recent transactions`,
+      };
+    }
+
+    return {
+      ready: false,
+      reason: `Bitcoin Core is syncing (${(verificationProgress * 100).toFixed(1)}% complete, ${blocks.toLocaleString()} blocks) but needs more progress before ready (needs >30% progress and >1000 blocks)`,
+    };
+  } catch (error: any) {
+    return {
+      ready: false,
+      reason: error.message || 'Error checking Bitcoin Core readiness',
     };
   }
 }
@@ -232,7 +307,10 @@ export async function testBitcoinRpcConnection(config: BitcoinRpcConfig): Promis
   details?: {
     chain?: string;
     blocks?: number;
+    headers?: number;
+    verificationprogress?: number;
   };
+  loading?: boolean; // Node is connected but still loading
 }> {
   try {
     const response = await callBitcoinRpc('getblockchaininfo', [], config);
@@ -241,9 +319,55 @@ export async function testBitcoinRpcConnection(config: BitcoinRpcConfig): Promis
       details: {
         chain: response.result?.chain,
         blocks: response.result?.blocks,
+        headers: response.result?.headers,
+        verificationprogress: response.result?.verificationprogress,
       },
     };
   } catch (error: any) {
+    // Error -28 means "Loading block index" or "Verifying blocks" or "Starting network threads"
+    // This is actually a successful connection, just not ready yet
+    if (error.message?.includes('error (-28)') || 
+        error.message?.includes('Loading block index') ||
+        error.message?.includes('Verifying blocks') ||
+        error.message?.includes('Starting network threads')) {
+      return {
+        connected: true, // RPC is connected and responding
+        loading: true,   // But node is still loading
+        error: 'Node is initializing. RPC is available but not ready for all operations yet.',
+      };
+    }
+    // Timeout errors during sync are common - treat as "connected but busy"
+    if (error.message?.includes('timeout') || error.code === 'ECONNABORTED') {
+      // Try a quick ping to see if RPC is actually reachable
+      try {
+        // Use a shorter timeout for the ping test
+        const pingResponse = await axios.post(config.url, {
+          jsonrpc: '2.0',
+          id: 999,
+          method: 'getblockcount',
+          params: [],
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            ...(config.user && config.password ? {
+              'Authorization': `Basic ${Buffer.from(`${config.user}:${config.password}`).toString('base64')}`
+            } : {}),
+          },
+          timeout: 10000, // 10 second timeout for ping
+        });
+        
+        // If we got any response (even an error), RPC is reachable
+        if (pingResponse.status === 200) {
+          return {
+            connected: true,
+            loading: true,
+            error: 'Node is busy syncing but RPC is reachable. It may take longer to respond during heavy sync operations.',
+          };
+        }
+      } catch (pingError: any) {
+        // If ping also fails, it's a real connection issue
+      }
+    }
     return {
       connected: false,
       error: error.message || 'Connection test failed',
@@ -360,6 +484,221 @@ async function checkNodeSyncForTransaction(
 }
 
 /**
+ * Verify package topology - check if spell transaction spends an output from commit transaction
+ * Bitcoin Core's submitpackage requires child-with-parents relationship
+ * 
+ * @param commitTxHex Commit transaction hex
+ * @param spellTxHex Spell transaction hex
+ * @returns Validation result with diagnostics
+ */
+async function verifyPackageTopology(
+  commitTxHex: string,
+  spellTxHex: string
+): Promise<{
+  valid: boolean;
+  reason?: string;
+  diagnostics?: {
+    commitTxid?: string;
+    commitOutputs?: number;
+    spellInputs?: number;
+    matchingInputs?: number;
+    commitOutputHashes?: string[];
+    spellInputHashes?: string[];
+  };
+}> {
+  try {
+    const bitcoin = await import('bitcoinjs-lib');
+    const network = NETWORK === 'testnet4' || NETWORK === 'testnet'
+      ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
+      : bitcoin.networks.bitcoin;
+
+    // Parse commit transaction
+    const commitTx = bitcoin.Transaction.fromHex(commitTxHex.trim());
+    const commitTxid = commitTx.getId();
+    
+    // Parse spell transaction
+    const spellTx = bitcoin.Transaction.fromHex(spellTxHex.trim());
+    
+    // Extract commit transaction outputs (these are what spell should spend)
+    // The commit transaction creates Taproot outputs that the spell transaction spends
+    const commitOutputHashes: string[] = [];
+    for (let i = 0; i < commitTx.outs.length; i++) {
+      // Create a reference: txid:vout format
+      commitOutputHashes.push(`${commitTxid}:${i}`);
+    }
+    
+    // Extract spell transaction inputs and check if any reference commit outputs
+    const spellInputHashes: string[] = [];
+    let matchingInputs = 0;
+    
+    for (let i = 0; i < spellTx.ins.length; i++) {
+      const input = spellTx.ins[i];
+      const hashBuffer = Buffer.from(input.hash);
+      const txid = hashBuffer.reverse().toString('hex');
+      const vout = input.index;
+      const inputRef = `${txid}:${vout}`;
+      spellInputHashes.push(inputRef);
+      
+      // Check if this input references a commit output
+      if (commitOutputHashes.includes(inputRef)) {
+        matchingInputs++;
+      }
+    }
+    
+    const diagnostics = {
+      commitTxid,
+      commitOutputs: commitTx.outs.length,
+      spellInputs: spellTx.ins.length,
+      matchingInputs,
+      commitOutputHashes,
+      spellInputHashes,
+    };
+    
+    // Package topology is valid if spell transaction has at least one input that references commit output
+    if (matchingInputs > 0) {
+      return {
+        valid: true,
+        diagnostics,
+      };
+    }
+    
+    return {
+      valid: false,
+      reason: `Spell transaction does not spend any output from commit transaction. Commit has ${commitTx.outs.length} output(s), spell has ${spellTx.ins.length} input(s), but none match.`,
+      diagnostics,
+    };
+  } catch (error: any) {
+    return {
+      valid: false,
+      reason: `Failed to verify package topology: ${error.message}`,
+    };
+  }
+}
+
+/**
+ * Extract transaction structure for diagnostics
+ * 
+ * @param txHex Transaction hex
+ * @returns Transaction structure information
+ */
+async function extractTransactionStructure(txHex: string): Promise<{
+  txid: string;
+  inputCount: number;
+  outputCount: number;
+  inputs: Array<{ txid: string; vout: number; ref: string }>;
+  size: number;
+}> {
+  try {
+    const bitcoin = await import('bitcoinjs-lib');
+    const network = NETWORK === 'testnet4' || NETWORK === 'testnet'
+      ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
+      : bitcoin.networks.bitcoin;
+
+    const tx = bitcoin.Transaction.fromHex(txHex.trim());
+    const txid = tx.getId();
+    
+    const inputs = tx.ins.map((input, index) => {
+      const hashBuffer = Buffer.from(input.hash);
+      const inputTxid = hashBuffer.reverse().toString('hex');
+      const vout = input.index;
+      return {
+        txid: inputTxid,
+        vout,
+        ref: `${inputTxid}:${vout}`,
+      };
+    });
+    
+    return {
+      txid,
+      inputCount: tx.ins.length,
+      outputCount: tx.outs.length,
+      inputs,
+      size: txHex.trim().length / 2, // Size in bytes
+    };
+  } catch (error: any) {
+    throw new Error(`Failed to extract transaction structure: ${error.message}`);
+  }
+}
+
+/**
+ * Submit transactions sequentially as fallback when package submission fails
+ * This works even when Bitcoin Core can't verify package topology
+ * 
+ * @param commitTxHex Commit transaction hex
+ * @param spellTxHex Spell transaction hex
+ * @param config Bitcoin RPC configuration
+ * @returns Object with transaction IDs for both transactions
+ */
+async function submitTransactionsSequentially(
+  commitTxHex: string,
+  spellTxHex: string,
+  config: BitcoinRpcConfig
+): Promise<{ commitTxid: string; spellTxid: string }> {
+  console.log('📦 Attempting sequential transaction submission (fallback method)...');
+  console.log('   Step 1: Submitting commit transaction...');
+  
+  try {
+    // Step 1: Submit commit transaction
+    const commitResponse = await callBitcoinRpc('sendrawtransaction', [commitTxHex.trim()], config);
+    const commitTxid = commitResponse.result;
+    
+    if (!commitTxid || typeof commitTxid !== 'string') {
+      throw new Error('Bitcoin Core RPC returned invalid commit transaction ID');
+    }
+    
+    console.log(`✅ Commit transaction submitted: ${commitTxid}`);
+    
+    // Step 2: Wait for commit transaction to be accepted into mempool
+    console.log('   Step 2: Waiting for commit transaction to be accepted into mempool...');
+    const commitAccepted = await waitForMempoolAcceptance(commitTxid, 30000, 1000);
+    
+    if (!commitAccepted) {
+      console.warn(`⚠️ Warning: Commit transaction ${commitTxid} was not found in mempool within timeout`);
+      console.warn('⚠️ Proceeding with spell broadcast anyway - it may fail if commit is not in mempool');
+    } else {
+      console.log(`✅ Commit transaction ${commitTxid} confirmed in mempool`);
+    }
+    
+    // Step 3: Submit spell transaction
+    console.log('   Step 3: Submitting spell transaction...');
+    const spellResponse = await callBitcoinRpc('sendrawtransaction', [spellTxHex.trim()], config);
+    const spellTxid = spellResponse.result;
+    
+    if (!spellTxid || typeof spellTxid !== 'string') {
+      throw new Error('Bitcoin Core RPC returned invalid spell transaction ID');
+    }
+    
+    console.log(`✅ Spell transaction submitted: ${spellTxid}`);
+    console.log(`✅ Sequential submission successful: commit=${commitTxid}, spell=${spellTxid}`);
+    
+    return { commitTxid, spellTxid };
+  } catch (error: any) {
+    console.error('❌ Sequential transaction submission failed:', error.message);
+    
+    // Check if this is a UTXO not found error (sync issue)
+    const isUtxoNotFound = error.message?.includes('bad-txns-inputs-missingorspent') ||
+                          error.message?.includes('inputs-missingorspent') ||
+                          error.message?.includes('missingorspent');
+    
+    if (isUtxoNotFound) {
+      const enhancedError: any = new Error(
+        `Sequential submission failed: Bitcoin Core doesn't have the UTXO data needed. ` +
+        `The commit transaction spends a UTXO that Bitcoin Core hasn't synced yet. ` +
+        `This is a sync issue - Bitcoin Core needs to download more blocks to have the UTXO data. ` +
+        `Current sync: ~60% complete. Please wait for Bitcoin Core to sync more blocks.`
+      );
+      enhancedError.originalError = error.message;
+      enhancedError.errorType = 'utxo_not_synced';
+      enhancedError.errorCode = 'UTXO_NOT_SYNCED';
+      enhancedError.isSyncIssue = true;
+      throw enhancedError;
+    }
+    
+    throw error;
+  }
+}
+
+/**
  * Broadcast transaction package using Bitcoin Core's submitpackage RPC
  * Per Charms docs: "This is functionally equivalent to bitcoin-cli submitpackage command"
  * 
@@ -375,6 +714,36 @@ async function broadcastPackageViaBitcoinRpc(
 ): Promise<{ commitTxid: string; spellTxid: string }> {
   console.log('📦 Attempting package broadcast via Bitcoin Core RPC (submitpackage)...');
   console.log(`   RPC URL: ${config.url.replace(/\/\/.*@/, '//***:***@')}`); // Hide credentials in logs
+
+  // Step 1: Verify package topology before submission
+  console.log('🔍 Verifying package topology...');
+  const topologyCheck = await verifyPackageTopology(commitTxHex, spellTxHex);
+  
+  if (!topologyCheck.valid) {
+    console.warn(`⚠️ Package topology validation failed: ${topologyCheck.reason}`);
+    if (topologyCheck.diagnostics) {
+      console.warn(`   Diagnostics:`, JSON.stringify(topologyCheck.diagnostics, null, 2));
+    }
+    console.warn('⚠️ Proceeding with package submission anyway - Bitcoin Core will validate');
+  } else {
+    console.log('✅ Package topology verified: spell transaction spends commit output');
+    if (topologyCheck.diagnostics) {
+      console.log(`   Commit outputs: ${topologyCheck.diagnostics.commitOutputs}, Spell inputs: ${topologyCheck.diagnostics.spellInputs}, Matching: ${topologyCheck.diagnostics.matchingInputs}`);
+    }
+  }
+
+  // Step 2: Extract transaction structure for diagnostics
+  let commitStructure: any = null;
+  let spellStructure: any = null;
+  try {
+    commitStructure = await extractTransactionStructure(commitTxHex);
+    spellStructure = await extractTransactionStructure(spellTxHex);
+    console.log(`📋 Transaction structure:`);
+    console.log(`   Commit: ${commitStructure.txid} (${commitStructure.inputCount} inputs, ${commitStructure.outputCount} outputs, ${commitStructure.size} bytes)`);
+    console.log(`   Spell: ${spellStructure.txid} (${spellStructure.inputCount} inputs, ${spellStructure.outputCount} outputs, ${spellStructure.size} bytes)`);
+  } catch (structError: any) {
+    console.warn(`⚠️ Could not extract transaction structure: ${structError.message}`);
+  }
 
   try {
     // Call submitpackage with array of transaction hex strings
@@ -447,48 +816,76 @@ async function broadcastPackageViaBitcoinRpc(
     return { commitTxid, spellTxid };
   } catch (error: any) {
     console.error('❌ Bitcoin RPC package broadcast failed:', error.message);
+    
+    // Check if this is a package topology error (RPC error -25)
+    const isTopologyError = error.message?.includes('error (-25)') || 
+                           error.message?.includes('package topology') ||
+                           error.message?.includes('topology disallowed') ||
+                           error.message?.includes('not child-with-parents');
+    
+    if (isTopologyError) {
+      console.warn('⚠️ Package topology error detected - attempting fallback to sequential submission...');
+      console.warn('   This can happen if Bitcoin Core cannot verify the parent-child relationship');
+      console.warn('   Possible causes:');
+      console.warn('   1. Node hasn\'t synced enough blocks to have UTXO data');
+      console.warn('   2. The commit transaction spends UTXOs not yet in the node\'s view');
+      console.warn('   3. Package topology validation issue');
+      
+      // Try fallback: submit transactions sequentially
+      try {
+        return await submitTransactionsSequentially(commitTxHex, spellTxHex, config);
+      } catch (fallbackError: any) {
+        // Check if fallback failed due to sync issue
+        const isSyncIssue = fallbackError.isSyncIssue || 
+                           fallbackError.errorType === 'utxo_not_synced' ||
+                           fallbackError.errorType === 'sync_required' ||
+                           fallbackError.message?.includes("doesn't have the UTXO data") ||
+                           fallbackError.message?.includes('bad-txns-inputs-missingorspent');
+        
+        if (isSyncIssue) {
+          // This is a sync issue - provide clear guidance
+          const enhancedError: any = new Error(
+            `Package topology error and sequential fallback failed due to sync issue. ` +
+            `Bitcoin Core hasn't synced enough blocks to have the UTXO data needed. ` +
+            `Original error: ${error.message}. ` +
+            `Fallback error: ${fallbackError.message}`
+          );
+          enhancedError.originalError = error.message;
+          enhancedError.fallbackError = fallbackError.message;
+          enhancedError.errorType = 'sync_required';
+          enhancedError.errorCode = 'SYNC_REQUIRED';
+          enhancedError.isSyncIssue = true;
+          enhancedError.diagnostics = {
+            topologyCheck: topologyCheck.diagnostics,
+            commitStructure,
+            spellStructure,
+            recommendation: 'Wait for Bitcoin Core to finish syncing. The node needs to download blocks containing the UTXO you\'re trying to spend.',
+          };
+          throw enhancedError;
+        }
+        
+        // If fallback also fails for other reasons, throw with enhanced error information
+        const enhancedError: any = new Error(
+          `Package topology error and sequential fallback failed. ` +
+          `Original error: ${error.message}. ` +
+          `Fallback error: ${fallbackError.message}`
+        );
+        enhancedError.originalError = error.message;
+        enhancedError.fallbackError = fallbackError.message;
+        enhancedError.errorType = 'package_topology_error';
+        enhancedError.errorCode = 'PACKAGE_TOPOLOGY_ERROR';
+        enhancedError.diagnostics = {
+          topologyCheck: topologyCheck.diagnostics,
+          commitStructure,
+          spellStructure,
+        };
+        throw enhancedError;
+      }
+    }
+    
+    // For other errors, re-throw as-is
     throw error;
   }
-}
-
-/**
- * Helper function to retry a CryptoAPIs request with exponential backoff on rate limit errors
- */
-async function retryCryptoApisRequest(
-  requestFn: () => Promise<any>,
-  maxRetries: number = 3,
-  baseDelayMs: number = 1000
-): Promise<any> {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await requestFn();
-    } catch (error: any) {
-      const isRateLimit = error.response?.status === 429;
-      const isLastAttempt = attempt === maxRetries - 1;
-      
-      if (isRateLimit && !isLastAttempt) {
-        // Calculate exponential backoff delay: 1s, 2s, 4s, etc.
-        const delayMs = baseDelayMs * Math.pow(2, attempt);
-        const errorMsg = typeof error.response?.data === 'string'
-          ? error.response.data
-          : error.response?.data?.error?.message || error.response?.data?.message || 
-            error.response?.data?.error || 'Rate limit exceeded';
-        
-        console.warn(`⚠️ CryptoAPIs rate limit (429) - retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxRetries})...`);
-        console.warn(`   Error: ${errorMsg}`);
-        
-        // Wait before retrying
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-        continue;
-      }
-      
-      // If not a rate limit error or last attempt, throw the error
-      throw error;
-    }
-  }
-  
-  // This should never be reached, but TypeScript needs it
-  throw new Error('Max retries exceeded');
 }
 
 /**
@@ -682,300 +1079,110 @@ router.post('/tx', async (req: Request, res: Response) => {
       // Continue anyway - validation already passed
     }
 
-    // Try CryptoAPIs first (if API key available), then Mempool.space as fallback
     console.log(`📤 Broadcasting transaction (${txHex.length} bytes, network: ${NETWORK})...`);
     
-    let broadcastUrl: string;
-    let broadcastService: string;
-    let lastError: string | null = null;
-    let cryptoApisConfigError = false; // Track if error is due to API key configuration
+    // Check if Bitcoin Core is configured and ready
+    const bitcoinRpcConfig = getBitcoinRpcConfig();
     
-    // Try CryptoAPIs first (if API key is available) - good for testnet4
-    const cryptoApisApiKey = getCryptoApisApiKey();
-    if (cryptoApisApiKey) {
-      const cryptoApisNetwork = getCryptoApisNetwork(NETWORK);
-      // Try testnet4 directly first, then fallback to testnet
-      const networksToTry = NETWORK === 'testnet4' ? ['testnet4', 'testnet'] : [cryptoApisNetwork];
-      
-      let cryptoApisSuccess = false;
-      for (const network of networksToTry) {
-        // Try both v2 and non-v2 base URLs
-        const baseUrls = [CRYPTOAPIS_BASE_URL_V2, CRYPTOAPIS_BASE_URL];
-        
-        for (const baseUrl of baseUrls) {
-          broadcastUrl = `${baseUrl}/bitcoin/${network}`;
-          broadcastService = `CryptoAPIs (${network})`;
-          console.log(`📤 Attempting broadcast via ${broadcastService}: ${broadcastUrl}`);
-          
-          try {
-            // Use retry logic for rate limit errors (429)
-            // Request body format per CryptoAPIs docs: { context, data: { item: { signedTransactionHex } } }
-            const requestBody = {
-              context: 'charm-cards-broadcast',
-              data: {
-                item: {
-                  signedTransactionHex: txHex
-                }
-              }
-            };
-            console.log(`   Request body structure:`, JSON.stringify({ ...requestBody, data: { item: { signedTransactionHex: `${txHex.substring(0, 20)}...` } } }, null, 2));
-            
-            const response = await retryCryptoApisRequest(async () => {
-              return await axios.post(broadcastUrl, requestBody, {
-                timeout: 60000, // 60 second timeout
-                headers: {
-                  'Content-Type': 'application/json',
-                  'X-API-Key': cryptoApisApiKey,
-                },
-                validateStatus: (status) => status < 500,
-              });
-            }, 3, 1000); // Max 3 retries, starting with 1 second delay
-
-            if (response.status >= 200 && response.status < 300) {
-              // CryptoAPIs returns JSON with transactionId in data.item.transactionId
-              // Response structure: { data: { item: { transactionId: "..." } } }
-              const txid = response.data?.data?.item?.transactionId || 
-                           response.data?.data?.transactionId ||
-                           response.data?.item?.transactionId ||
-                           (typeof response.data === 'string' ? response.data.trim() : String(response.data).trim());
-              
-              if (txid && txid.length > 0) {
-                console.log(`✅ Transaction broadcast successfully via ${broadcastService}: ${txid}`);
-                res.setHeader('Content-Type', 'text/plain');
-                return res.send(txid);
-              } else {
-                console.error('❌ CryptoAPIs response structure:', JSON.stringify(response.data, null, 2));
-                throw new Error('CryptoAPIs returned success but no transaction ID in response');
-              }
-            } else {
-              // CryptoAPIs returned error status - check error type
-              const errorMsg = typeof response.data === 'string'
-                ? response.data
-                : response.data?.error?.message || response.data?.message || 
-                  response.data?.error || `Broadcast failed with status ${response.status}`;
-              
-              const errorMsgLower = errorMsg.toLowerCase();
-              
-              // If 400 error (bad endpoint), skip remaining CryptoAPIs attempts and go to Mempool.space
-              if (response.status === 400) {
-                if (errorMsgLower.includes('uri') || errorMsgLower.includes('not found')) {
-                  console.error(`❌ CryptoAPIs endpoint appears incorrect (400): ${errorMsg}`);
-                  console.error(`   Skipping remaining CryptoAPIs attempts and falling back to Mempool.space`);
-                  lastError = `CryptoAPIs endpoint error: ${errorMsg}`;
-                  cryptoApisSuccess = false;
-                  break; // Exit both loops and go to Mempool.space
-                }
-              }
-              
-              // Handle rate limit errors (429) - these should have been retried, but if still failing, log and continue
-              if (response.status === 429) {
-                lastError = `CryptoAPIs rate limit exceeded (429): ${errorMsg}. Please wait a moment and try again, or upgrade your CryptoAPIs plan.`;
-                console.error(`❌ ${broadcastService} rate limit error (429): ${errorMsg}`);
-                console.error(`   Retries were attempted but rate limit persists. Consider upgrading your CryptoAPIs plan or waiting before retrying.`);
-                // Continue to next URL/network combination (might try Mempool.space as fallback)
-                continue;
-              }
-              
-              // Check if error is related to API key configuration
-              if (response.status === 401 || response.status === 403 || 
-                  errorMsgLower.includes('api key') || 
-                  errorMsgLower.includes('authentication') ||
-                  errorMsgLower.includes('not configured') ||
-                  errorMsgLower.includes('invalid') ||
-                  errorMsgLower.includes('unauthorized')) {
-                cryptoApisConfigError = true;
-                lastError = `CryptoAPIs API key appears to be invalid or not configured correctly. Error: ${errorMsg}`;
-                console.error(`❌ ${broadcastService} authentication/configuration error (${response.status}): ${errorMsg}`);
-              } else {
-                console.warn(`⚠️ ${broadcastService} broadcast failed (${response.status}): ${errorMsg}`);
-                if (!lastError) {
-                  lastError = `${broadcastService}: ${errorMsg}`;
-                }
-              }
-              // Continue to next URL/network combination
-              continue;
-            }
-          } catch (cryptoApisError: any) {
-            // Log error but continue to next URL/network combination
-            if (cryptoApisError.response) {
-              const errorMsg = typeof cryptoApisError.response.data === 'string'
-                ? cryptoApisError.response.data
-                : cryptoApisError.response.data?.error?.message || cryptoApisError.response.data?.message || 
-                  cryptoApisError.response.data?.error || `Error ${cryptoApisError.response.status}`;
-              
-              const errorMsgLower = errorMsg.toLowerCase();
-              const status = cryptoApisError.response.status;
-              
-              // Handle rate limit errors (429) - retry logic should have handled this, but log if it still fails
-              if (status === 429) {
-                lastError = `CryptoAPIs rate limit exceeded (429): ${errorMsg}. Please wait a moment and try again, or upgrade your CryptoAPIs plan.`;
-                console.error(`❌ ${broadcastService} rate limit error (429): ${errorMsg}`);
-                console.error(`   Retries were attempted but rate limit persists. Consider upgrading your CryptoAPIs plan or waiting before retrying.`);
-                // Continue to next URL/network combination (might try Mempool.space as fallback)
-                continue;
-              }
-              
-              // Check if error is related to API key configuration
-              if (status === 401 || status === 403 || 
-                  errorMsgLower.includes('api key') || 
-                  errorMsgLower.includes('authentication') ||
-                  errorMsgLower.includes('not configured') ||
-                  errorMsgLower.includes('invalid') ||
-                  errorMsgLower.includes('unauthorized')) {
-                cryptoApisConfigError = true;
-                lastError = `CryptoAPIs API key appears to be invalid or not configured correctly. Error: ${errorMsg}`;
-                console.error(`❌ ${broadcastService} authentication/configuration error (${status}): ${errorMsg}`);
-              } else {
-                console.warn(`⚠️ ${broadcastService} failed: ${errorMsg}`);
-                if (!lastError) {
-                  lastError = `${broadcastService}: ${errorMsg}`;
-                }
-              }
-            } else {
-              console.warn(`⚠️ ${broadcastService} failed: ${cryptoApisError.message || 'Network error'}`);
-              if (!lastError) {
-                lastError = `${broadcastService}: ${cryptoApisError.message || 'Network error'}`;
-              }
-            }
-            // Continue to next URL/network combination
-            continue;
-          }
-        }
-      }
-      
-      // If we get here, all CryptoAPIs attempts failed
-      if (cryptoApisConfigError) {
-        console.error(`❌ CryptoAPIs API key configuration error detected. Please check your CRYPTOAPIS_API_KEY in api/.env`);
-        console.error(`   The API key exists (${cryptoApisApiKey.length} chars) but appears to be invalid or not properly configured.`);
-        console.error(`   Last error: ${lastError}`);
-      } else if (lastError) {
-        console.warn(`⚠️ All CryptoAPIs attempts failed, last error: ${lastError}`);
-      }
-    } else {
-      console.log('ℹ️ CryptoAPIs API key not configured, skipping CryptoAPIs broadcast');
-    }
-    
-    // Try Mempool.space as secondary fallback (supports testnet4 natively)
-    broadcastUrl = `${MEMEPOOL_BASE_URL}/api/tx`;
-    broadcastService = 'Mempool.space';
-    console.log(`📤 Attempting broadcast via ${broadcastService}: ${broadcastUrl}`);
-    
-    try {
-      const response = await axios.post(broadcastUrl, txHex, {
-        timeout: 60000, // 60 second timeout
-        headers: {
-          'Content-Type': 'text/plain',
-        },
-        validateStatus: (status) => status < 500, // Don't throw on 4xx errors
+    if (!bitcoinRpcConfig) {
+      return res.status(503).json({
+        error: 'Bitcoin Core RPC not configured',
+        errorType: 'rpc_not_configured',
+        errorCode: 'RPC_NOT_CONFIGURED',
+        message: 'Set BITCOIN_RPC_URL in api/.env to enable broadcasting',
+        suggestion: 'Add BITCOIN_RPC_URL=http://user:password@localhost:18332 to api/.env',
+        healthCheck: 'Check /api/broadcast/health for configuration status',
       });
-
-      if (response.status >= 200 && response.status < 300) {
-        // Mempool.space returns transaction ID
-        const txid = typeof response.data === 'string'
-          ? response.data.trim()
-          : response.data?.txid || response.data?.transactionId || String(response.data).trim();
-        
-        if (txid && txid.length > 0) {
-          console.log(`✅ Transaction broadcast successfully via ${broadcastService}: ${txid}`);
-          res.setHeader('Content-Type', 'text/plain');
-          return res.send(txid);
-        } else {
-          console.error('❌ Mempool.space response structure:', JSON.stringify(response.data, null, 2));
-          lastError = 'Mempool.space returned success but no transaction ID in response';
-        }
-      } else {
-        // Mempool.space returned error status
-        const errorMsg = typeof response.data === 'string'
-          ? response.data
-          : response.data?.error || response.data?.message || `Broadcast failed with status ${response.status}`;
-        lastError = `${broadcastService}: ${errorMsg}`;
-        console.warn(`⚠️ ${broadcastService} broadcast failed (${response.status}): ${errorMsg}`);
-      }
-    } catch (mempoolError: any) {
-      // Log detailed error information
-      console.error(`❌ ${broadcastService} broadcast error:`);
-      console.error('   Error type:', mempoolError.constructor?.name || typeof mempoolError);
-      console.error('   Error message:', mempoolError.message || 'No error message');
-      console.error('   Error code:', mempoolError.code || 'No error code');
-      if (mempoolError.response) {
-        console.error('   Response status:', mempoolError.response.status);
-        console.error('   Response headers:', JSON.stringify(mempoolError.response.headers));
-        console.error('   Response data type:', typeof mempoolError.response.data);
-        console.error('   Response data:', mempoolError.response.data);
-        
-        // Try to extract meaningful error message
-        let errorMsg = 'Unknown error';
-        if (typeof mempoolError.response.data === 'string') {
-          errorMsg = mempoolError.response.data;
-        } else if (mempoolError.response.data?.error) {
-          errorMsg = mempoolError.response.data.error;
-        } else if (mempoolError.response.data?.message) {
-          errorMsg = mempoolError.response.data.message;
-        } else if (mempoolError.response.data) {
-          errorMsg = JSON.stringify(mempoolError.response.data);
-        }
-        lastError = `${broadcastService}: ${errorMsg}`;
-      } else {
-        lastError = `${broadcastService}: ${mempoolError.message || mempoolError.code || 'Network error'}`;
-      }
-      console.error('   Request URL:', broadcastUrl);
-      console.error('   Transaction hex length:', txHex.length);
-      console.error('   Transaction hex (first 200 chars):', txHex.substring(0, 200));
-      if (inputUtxos.length > 0) {
-        console.error('   Input UTXOs being spent:', inputUtxos.join(', '));
-        console.error('   ⚠️ If transaction is "orphaned", check if these UTXOs exist and are unspent');
-      }
     }
     
-    // All broadcasting services failed
-    let finalErrorMessage = `All broadcasting endpoints failed. ${lastError || 'Unknown error'}`;
-    if (cryptoApisConfigError) {
-      finalErrorMessage = `CryptoAPIs API key is not configured correctly. ${lastError || 'The API key exists but appears to be invalid or not properly configured. Please check your CRYPTOAPIS_API_KEY in api/.env and ensure it is a valid CryptoAPIs API key.'}`;
+    // Check if Bitcoin Core is ready for broadcasting
+    const readiness = await isBitcoinCoreReady(bitcoinRpcConfig);
+    
+    if (!readiness.ready) {
+      // Determine error type based on reason
+      let errorType = 'node_not_ready';
+      let errorCode = 'NODE_NOT_READY';
+      
+      if (readiness.reason?.includes('not configured')) {
+        errorType = 'rpc_not_configured';
+        errorCode = 'RPC_NOT_CONFIGURED';
+      } else if (readiness.reason?.includes('not connected') || readiness.reason?.includes('connection')) {
+        errorType = 'rpc_connection_failed';
+        errorCode = 'RPC_CONNECTION_FAILED';
+      } else if (readiness.reason?.includes('timeout')) {
+        errorType = 'rpc_timeout';
+        errorCode = 'RPC_TIMEOUT';
+      } else if (readiness.reason?.includes('loading') || readiness.reason?.includes('syncing')) {
+        errorType = 'node_syncing';
+        errorCode = 'NODE_SYNCING';
+      }
+      
+      return res.status(503).json({
+        error: 'Bitcoin Core RPC is not ready for broadcasting',
+        errorType,
+        errorCode,
+        reason: readiness.reason,
+        message: 'Bitcoin Core node must be ready before broadcasting transactions',
+        suggestion: 'Wait for Bitcoin Core to finish syncing or check node status',
+        healthCheck: 'Check /api/broadcast/ready or /api/broadcast/health for current status',
+      });
     }
-    if (inputUtxos.length > 0) {
-      finalErrorMessage += ` Input UTXOs: ${inputUtxos.join(', ')}. If transaction is "orphaned", the UTXO may not exist or may have been spent.`;
+    
+    // Broadcast via Bitcoin Core RPC
+    try {
+      console.log(`✅ Using Bitcoin Core RPC (healthy): ${readiness.reason}`);
+      const response = await callBitcoinRpc('sendrawtransaction', [txHex], bitcoinRpcConfig);
+      const txid = response.result;
+      
+      if (txid && typeof txid === 'string') {
+        console.log(`✅ Transaction broadcast successfully via Bitcoin Core RPC: ${txid}`);
+        res.setHeader('Content-Type', 'text/plain');
+        return res.send(txid);
+      } else {
+        throw new Error('Bitcoin Core RPC returned invalid transaction ID');
+      }
+    } catch (rpcError: any) {
+      console.error(`❌ Bitcoin Core RPC broadcast failed: ${rpcError.message}`);
+      
+      // Provide actionable error information
+      let troubleshooting: string[] = [];
+      if (rpcError.message?.includes('connection refused') || rpcError.message?.includes('ECONNREFUSED')) {
+        troubleshooting = [
+          'Check if node is running: ps aux | grep bitcoind',
+          'Node may still be starting - wait 30-60 seconds',
+          'Run diagnostic: ./check-bitcoin-rpc.sh',
+          'Check RPC config: cat ~/.bitcoin/testnet4/bitcoin.conf | grep rpc',
+        ];
+      } else if (rpcError.message?.includes('bad-txns-inputs-missingorspent') || rpcError.message?.includes('inputs-missingorspent')) {
+        troubleshooting = [
+          'Node may not have synced enough blocks yet',
+          'The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded',
+          'Wait for node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)',
+          'Check sync status: bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
+        ];
+      } else if (rpcError.message?.includes('timeout')) {
+        troubleshooting = [
+          'Node may be overloaded or slow to respond',
+          'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+        ];
+      }
+      
+      return res.status(500).json({
+        error: 'Bitcoin Core RPC broadcast failed',
+        message: rpcError.message || 'Unknown error',
+        troubleshooting,
+        healthCheck: 'Check /api/broadcast/health for node status',
+      });
     }
-    const finalError = new Error(finalErrorMessage);
-    throw finalError;
   } catch (error: any) {
     // Comprehensive error logging
     console.error('❌ Error broadcasting transaction');
     console.error('   Error type:', error.constructor?.name || typeof error);
     console.error('   Error message:', error.message || 'No error message');
     console.error('   Error code:', error.code || 'No error code');
-    console.error('   Error stack:', error.stack || 'No stack trace');
+    
     if (typeof txHex !== 'undefined') {
       console.error('   Transaction hex length:', txHex.length);
-    }
-
-    if (error.response) {
-      console.error('   Response status:', error.response.status);
-      console.error('   Response headers:', error.response.headers);
-      console.error('   Response data:', error.response.data);
-      
-      const errorMessage = typeof error.response.data === 'string'
-        ? error.response.data
-        : error.response.data?.error || error.response.data?.message || 'Failed to broadcast transaction';
-      
-      return res.status(error.response.status).json({
-        error: errorMessage,
-        status: error.response.status,
-        details: error.response.data,
-      });
-    }
-
-    if (error.code === 'ECONNREFUSED') {
-      return res.status(503).json({
-        error: 'Failed to connect to broadcasting service. The service may be unavailable.',
-        message: error.message,
-      });
-    }
-
-    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      return res.status(504).json({
-        error: 'Broadcast request timed out. Please try again.',
-        message: error.message,
-      });
     }
 
     // Extract error message from various possible formats
@@ -1001,11 +1208,8 @@ router.post('/tx', async (req: Request, res: Response) => {
 
 /**
  * POST /api/broadcast/package
- * Broadcast commit and spell transactions as a package
- * Based on: https://docs.charms.dev/guides/wallet-integration/transactions/broadcasting/
- * 
- * Request body: { commitTx: string, spellTx: string }
- * Response: { commitTxid: string, spellTxid: string }
+ * Broadcast a transaction package (commit + spell) via Bitcoin Core RPC
+ * Per Charms docs: "Broadcast both transactions together as a package"
  */
 router.post('/package', async (req: Request, res: Response) => {
   try {
@@ -1040,650 +1244,204 @@ router.post('/package', async (req: Request, res: Response) => {
     }
     console.log(`✅ Spell transaction validation passed: ${spellValidation.details?.size} bytes, ${spellValidation.details?.inputCount} input(s), ${spellValidation.details?.outputCount} output(s)`);
 
-    // Broadcasting priority (per Charms docs):
-    // 1. Bitcoin Core RPC submitpackage (true package broadcasting)
-    // 2. Wallet package method (if available)
-    // 3. Rapid sequential broadcasting (CryptoAPIs → Mempool.space)
+    // Extract transaction structure for diagnostics
+    let commitStructure: any = null;
+    let spellStructure: any = null;
+    try {
+      commitStructure = await extractTransactionStructure(commitTxHex);
+      spellStructure = await extractTransactionStructure(spellTxHex);
+      console.log(`📋 Package transaction structure:`);
+      console.log(`   Commit TX: ${commitStructure.txid}`);
+      console.log(`     Inputs: ${commitStructure.inputCount}, Outputs: ${commitStructure.outputCount}, Size: ${commitStructure.size} bytes`);
+      if (commitStructure.inputs.length > 0) {
+        console.log(`     Input UTXOs: ${commitStructure.inputs.map((i: any) => i.ref).join(', ')}`);
+      }
+      console.log(`   Spell TX: ${spellStructure.txid}`);
+      console.log(`     Inputs: ${spellStructure.inputCount}, Outputs: ${spellStructure.outputCount}, Size: ${spellStructure.size} bytes`);
+      if (spellStructure.inputs.length > 0) {
+        console.log(`     Input UTXOs: ${spellStructure.inputs.map((i: any) => i.ref).join(', ')}`);
+      }
+    } catch (structError: any) {
+      console.warn(`⚠️ Could not extract transaction structure: ${structError.message}`);
+    }
+
+    // Verify package topology before broadcasting
+    console.log('🔍 Verifying package topology before broadcast...');
+    const topologyCheck = await verifyPackageTopology(commitTxHex, spellTxHex);
+    if (topologyCheck.valid) {
+      console.log(`✅ Package topology verified: spell transaction spends commit output`);
+      if (topologyCheck.diagnostics) {
+        console.log(`   Matching inputs: ${topologyCheck.diagnostics.matchingInputs} of ${topologyCheck.diagnostics.spellInputs}`);
+      }
+    } else {
+      console.warn(`⚠️ Package topology check failed: ${topologyCheck.reason}`);
+      if (topologyCheck.diagnostics) {
+        console.warn(`   Diagnostics:`, JSON.stringify(topologyCheck.diagnostics, null, 2));
+      }
+      console.warn(`⚠️ Will attempt package submission anyway - Bitcoin Core will validate`);
+    }
+
+    // Broadcasting via Bitcoin Core RPC submitpackage (true package broadcasting)
+    // Per Charms docs: "This is functionally equivalent to bitcoin-cli submitpackage command"
     console.log(`📤 Broadcasting transaction package (network: ${NETWORK}, commit: ${commitTxHex.length} bytes, spell: ${spellTxHex.length} bytes)`);
     
-    // Step 1: Try Bitcoin Core RPC submitpackage first (true package broadcasting)
-    // Per Charms docs: "This is functionally equivalent to bitcoin-cli submitpackage command"
+    // Check if Bitcoin Core is configured and ready
     const bitcoinRpcConfig = getBitcoinRpcConfig();
-    if (bitcoinRpcConfig) {
-      // Check node health and sync status before broadcasting
-      try {
-        const health = await getBitcoinNodeHealth(bitcoinRpcConfig);
-        if (!health.connected) {
-          console.warn(`⚠️ Bitcoin Core RPC node health check failed: ${health.error}`);
-          console.warn(`   Attempting broadcast anyway (node may be starting up)...`);
-        } else if (health.blockchain?.initialBlockDownload) {
-          const blocks = health.blockchain.blocks || 0;
-          const headers = health.blockchain.headers || 0;
-          console.warn(`⚠️ Bitcoin Core node is still syncing (${blocks.toLocaleString()}/${headers.toLocaleString()} blocks)`);
-          
-          // Extract input UTXO from commit transaction to check if node has synced enough
-          try {
-            const bitcoin = await import('bitcoinjs-lib');
-            const network = NETWORK === 'testnet4' || NETWORK === 'testnet'
-              ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
-              : bitcoin.networks.bitcoin;
-            const commitTx = bitcoin.Transaction.fromHex(commitTxHex);
-            
-            if (commitTx.ins.length > 0) {
-              // Get first input UTXO
-              const firstInput = commitTx.ins[0];
-              const hashBuffer = Buffer.from(firstInput.hash);
-              const txid = hashBuffer.reverse().toString('hex');
-              
-              // Check if node has synced enough for this UTXO
-              const syncCheck = await checkNodeSyncForTransaction(txid, bitcoinRpcConfig);
-              
-              if (!syncCheck.hasSyncedEnough && syncCheck.txBlockHeight !== null) {
-                console.warn(`⚠️ Node may not have synced enough blocks for UTXO ${txid}`);
-                console.warn(`   ${syncCheck.recommendation}`);
-                if (syncCheck.estimatedWaitTime) {
-                  console.warn(`   Estimated wait time: ${syncCheck.estimatedWaitTime}`);
-                }
-                console.warn(`   The node will attempt to broadcast, but may fail with "bad-txns-inputs-missingorspent"`);
-                console.warn(`   Consider waiting for sync or using fallback broadcasting methods.`);
-              } else if (syncCheck.txBlockHeight === null) {
-                console.warn(`   UTXO transaction is unconfirmed - node should be able to process it`);
-              }
-            }
-          } catch (parseError: any) {
-            console.warn(`⚠️ Could not check UTXO sync status: ${parseError.message}`);
-          }
-        }
-      } catch (healthError: any) {
-        // Don't fail broadcast if health check fails - just log warning
-        console.warn(`⚠️ Could not check Bitcoin Core node health: ${healthError.message}`);
-        console.warn(`   Proceeding with broadcast attempt...`);
-      }
-      
-      try {
-        const result = await broadcastPackageViaBitcoinRpc(commitTxHex, spellTxHex, bitcoinRpcConfig);
-        
-        // Verify both transactions are in mempool
-        console.log('⏳ Verifying both transactions are accepted into mempool...');
-        const commitInMempool = await checkTransactionInMempool(result.commitTxid);
-        const spellInMempool = await checkTransactionInMempool(result.spellTxid);
-        
-        return res.json({
-          commitTxid: result.commitTxid,
-          spellTxid: result.spellTxid,
-          broadcastMethod: 'bitcoin-core-rpc',
-          mempoolStatus: {
-            commitInMempool,
-            spellInMempool,
-          },
-        });
-      } catch (rpcError: any) {
-        console.warn(`⚠️ Bitcoin Core RPC package broadcast failed: ${rpcError.message}`);
-        
-        // Provide actionable error information based on error type
-        if (rpcError.message?.includes('connection refused') || rpcError.message?.includes('ECONNREFUSED')) {
-          console.warn('💡 Troubleshooting:');
-          console.warn('   1. Check if node is running: ps aux | grep bitcoind');
-          console.warn('   2. Node may still be starting - wait 30-60 seconds');
-          console.warn('   3. Run diagnostic: ./check-bitcoin-rpc.sh');
-          console.warn('   4. Check RPC config: cat ~/.bitcoin/testnet4/bitcoin.conf | grep rpc');
-        } else if (rpcError.message?.includes('timeout')) {
-          console.warn('💡 Node may be overloaded or still syncing');
-          console.warn('   Check logs: tail -f ~/.bitcoin/testnet4/debug.log');
-        } else if (rpcError.message?.includes('bad-txns-inputs-missingorspent') || rpcError.message?.includes('inputs-missingorspent')) {
-          console.warn('💡 This error usually means the node hasn\'t synced enough blocks yet.');
-          console.warn('   The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded.');
-          console.warn('   Solutions:');
-          console.warn('   1. Wait for the node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)');
-          console.warn('   2. Use fallback broadcasting methods (they don\'t require local node to have UTXO)');
-          console.warn('   3. Check sync status: ~/.local/bin/bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo');
-        } else if (rpcError.message?.includes('package topology') || rpcError.message?.includes('topology disallowed')) {
-          console.warn('💡 Package topology error - the commit transaction must be the parent of the spell transaction.');
-          console.warn('   This can happen if:');
-          console.warn('   1. The node doesn\'t have the commit transaction in its mempool');
-          console.warn('   2. The transaction order is incorrect');
-          console.warn('   The system will try fallback methods that may work better.');
-        }
-        
-        console.warn('⚠️ Falling back to sequential broadcasting methods...');
-        // Continue to fallback methods below
-      }
-    } else {
-      console.log('ℹ️ Bitcoin Core RPC not configured (BITCOIN_RPC_URL not set), skipping RPC package broadcast');
+    
+    if (!bitcoinRpcConfig) {
+      return res.status(503).json({
+        error: 'Bitcoin Core RPC not configured',
+        message: 'Set BITCOIN_RPC_URL in api/.env to enable package broadcasting',
+        suggestion: 'Add BITCOIN_RPC_URL=http://user:password@localhost:18332 to api/.env',
+        healthCheck: 'Check /api/broadcast/health for configuration status',
+      });
     }
     
-    // Step 2: Fallback to sequential broadcasting (CryptoAPIs → Mempool.space)
-    // Helper function to broadcast a single transaction with fallbacks
-    const broadcastSingleTx = async (txHex: string, txName: string): Promise<string> => {
-      let broadcastUrl: string;
-      let broadcastService: string;
-      let lastError: string | null = null;
+    // Check if Bitcoin Core is ready for broadcasting
+    const readiness = await isBitcoinCoreReady(bitcoinRpcConfig);
+    
+    if (!readiness.ready) {
+      // Determine error type based on reason
+      let errorType = 'node_not_ready';
+      let errorCode = 'NODE_NOT_READY';
       
-      // Try CryptoAPIs first (if API key is available) - good for testnet4
-      const cryptoApisApiKey = getCryptoApisApiKey();
-      if (cryptoApisApiKey) {
-        // Try testnet4 directly first, then fallback to testnet
-        const networksToTry = NETWORK === 'testnet4' ? ['testnet4', 'testnet'] : [getCryptoApisNetwork(NETWORK)];
-        
-        let cryptoApisSuccess = false;
-        let cryptoApisConfigError = false; // Track if error is due to API key configuration
-        for (const network of networksToTry) {
-          // Try both v2 and non-v2 base URLs
-          const baseUrls = [CRYPTOAPIS_BASE_URL_V2, CRYPTOAPIS_BASE_URL];
-          
-          for (const baseUrl of baseUrls) {
-            broadcastUrl = `${baseUrl}/bitcoin/${network}`;
-            broadcastService = `CryptoAPIs (${network})`;
-            console.log(`📤 Attempting ${txName} broadcast via ${broadcastService}: ${broadcastUrl}`);
-            
-            try {
-              // Use retry logic for rate limit errors (429)
-              // Request body format per CryptoAPIs docs: { context, data: { item: { signedTransactionHex } } }
-              const requestBody = {
-                context: 'charm-cards-broadcast',
-                data: {
-                  item: {
-                    signedTransactionHex: txHex
-                  }
-                }
-              };
-              console.log(`   Request body structure:`, JSON.stringify({ ...requestBody, data: { item: { signedTransactionHex: `${txHex.substring(0, 20)}...` } } }, null, 2));
-              
-              const response = await retryCryptoApisRequest(async () => {
-                return await axios.post(broadcastUrl, requestBody, {
-                  timeout: 60000, // 60 second timeout
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'X-API-Key': cryptoApisApiKey,
-                  },
-                  validateStatus: (status) => status < 500,
-                });
-              }, 3, 1000); // Max 3 retries, starting with 1 second delay
-
-              if (response.status >= 200 && response.status < 300) {
-                // CryptoAPIs returns JSON with transactionId in data.item.transactionId
-                const txid = response.data?.data?.item?.transactionId || 
-                             response.data?.data?.transactionId ||
-                             response.data?.item?.transactionId ||
-                             (typeof response.data === 'string' ? response.data.trim() : String(response.data).trim());
-                
-                if (txid && txid.length > 0) {
-                  console.log(`✅ ${txName} broadcast successfully via ${broadcastService}: ${txid}`);
-                  return txid;
-                } else {
-                  console.error(`❌ CryptoAPIs ${txName} response structure:`, JSON.stringify(response.data, null, 2));
-                  throw new Error('CryptoAPIs returned success but no transaction ID in response');
-                }
-              } else {
-                // Check error type
-                const errorMsg = typeof response.data === 'string'
-                  ? response.data
-                  : response.data?.error?.message || response.data?.message || 
-                    response.data?.error || `Broadcast failed with status ${response.status}`;
-                
-                const errorMsgLower = errorMsg.toLowerCase();
-                
-                // If 400 error (bad endpoint), skip remaining CryptoAPIs attempts and go to Mempool.space
-                if (response.status === 400) {
-                  if (errorMsgLower.includes('uri') || errorMsgLower.includes('not found')) {
-                    console.error(`❌ CryptoAPIs endpoint appears incorrect (400) for ${txName}: ${errorMsg}`);
-                    console.error(`   Skipping remaining CryptoAPIs attempts and falling back to Mempool.space`);
-                    lastError = `CryptoAPIs endpoint error: ${errorMsg}`;
-                    cryptoApisSuccess = false;
-                    break; // Exit both loops and go to Mempool.space
-                  }
-                }
-                
-                // Handle rate limit errors (429) - these should have been retried, but if still failing, log and continue
-                if (response.status === 429) {
-                  lastError = `CryptoAPIs rate limit exceeded (429) for ${txName}: ${errorMsg}. Please wait a moment and try again, or upgrade your CryptoAPIs plan.`;
-                  console.error(`❌ ${broadcastService} ${txName} rate limit error (429): ${errorMsg}`);
-                  console.error(`   Retries were attempted but rate limit persists. Consider upgrading your CryptoAPIs plan or waiting before retrying.`);
-                  // Continue to next URL/network combination (might try Mempool.space as fallback)
-                  continue;
-                }
-                
-                // Check if error is related to API key configuration
-                if (response.status === 401 || response.status === 403 || 
-                    errorMsgLower.includes('api key') || 
-                    errorMsgLower.includes('authentication') ||
-                    errorMsgLower.includes('not configured') ||
-                    errorMsgLower.includes('invalid') ||
-                    errorMsgLower.includes('unauthorized')) {
-                  cryptoApisConfigError = true;
-                  lastError = `CryptoAPIs API key appears to be invalid or not configured correctly. Error: ${errorMsg}`;
-                  console.error(`❌ ${broadcastService} ${txName} authentication/configuration error (${response.status}): ${errorMsg}`);
-                } else {
-                  console.warn(`⚠️ ${broadcastService} ${txName} failed (${response.status}): ${errorMsg}`);
-                  if (!lastError) {
-                    lastError = `${broadcastService} ${txName}: ${errorMsg}`;
-                  }
-                }
-                continue;
-              }
-            } catch (cryptoApisError: any) {
-              // Log error but continue to next URL/network combination
-              if (cryptoApisError.response) {
-                const errorMsg = typeof cryptoApisError.response.data === 'string'
-                  ? cryptoApisError.response.data
-                  : cryptoApisError.response.data?.error?.message || cryptoApisError.response.data?.message || 
-                    cryptoApisError.response.data?.error || `Error ${cryptoApisError.response.status}`;
-                
-                const errorMsgLower = errorMsg.toLowerCase();
-                const status = cryptoApisError.response.status;
-                
-                // If 400 error (bad endpoint), skip remaining CryptoAPIs attempts and go to Mempool.space
-                if (status === 400) {
-                  if (errorMsgLower.includes('uri') || errorMsgLower.includes('not found')) {
-                    console.error(`❌ CryptoAPIs endpoint appears incorrect (400) for ${txName}: ${errorMsg}`);
-                    console.error(`   Skipping remaining CryptoAPIs attempts and falling back to Mempool.space`);
-                    lastError = `CryptoAPIs endpoint error: ${errorMsg}`;
-                    cryptoApisSuccess = false;
-                    break; // Exit both loops and go to Mempool.space
-                  }
-                }
-                
-                // Handle rate limit errors (429) - retry logic should have handled this, but log if it still fails
-                if (status === 429) {
-                  lastError = `CryptoAPIs rate limit exceeded (429) for ${txName}: ${errorMsg}. Please wait a moment and try again, or upgrade your CryptoAPIs plan.`;
-                  console.error(`❌ ${broadcastService} ${txName} rate limit error (429): ${errorMsg}`);
-                  console.error(`   Retries were attempted but rate limit persists. Consider upgrading your CryptoAPIs plan or waiting before retrying.`);
-                  // Continue to next URL/network combination (might try Mempool.space as fallback)
-                  continue;
-                }
-                
-                // Check if error is related to API key configuration
-                if (status === 401 || status === 403 || 
-                    errorMsgLower.includes('api key') || 
-                    errorMsgLower.includes('authentication') ||
-                    errorMsgLower.includes('not configured') ||
-                    errorMsgLower.includes('invalid') ||
-                    errorMsgLower.includes('unauthorized')) {
-                  cryptoApisConfigError = true;
-                  lastError = `CryptoAPIs API key appears to be invalid or not configured correctly. Error: ${errorMsg}`;
-                  console.error(`❌ ${broadcastService} ${txName} authentication/configuration error (${status}): ${errorMsg}`);
-                } else {
-                  console.warn(`⚠️ ${broadcastService} ${txName} failed: ${errorMsg}`);
-                  if (!lastError) {
-                    lastError = `${broadcastService} ${txName}: ${errorMsg}`;
-                  }
-                }
-              } else {
-                console.warn(`⚠️ ${broadcastService} ${txName} failed: ${cryptoApisError.message || 'Network error'}`);
-                if (!lastError) {
-                  lastError = `${broadcastService} ${txName}: ${cryptoApisError.message || 'Network error'}`;
-                }
-              }
-              continue;
-            }
-          }
-        }
-        
-        // If we get here, all CryptoAPIs attempts failed
-        if (cryptoApisConfigError) {
-          console.error(`❌ CryptoAPIs API key configuration error detected for ${txName}. Please check your CRYPTOAPIS_API_KEY in api/.env`);
-          console.error(`   The API key exists (${cryptoApisApiKey.length} chars) but appears to be invalid or not properly configured.`);
-          console.error(`   Last error: ${lastError}`);
-        } else if (!lastError) {
-          lastError = 'CryptoAPIs: All endpoint attempts failed';
-        }
-        if (lastError && !cryptoApisConfigError) {
-          console.warn(`⚠️ All CryptoAPIs attempts failed for ${txName}, trying Mempool.space...`);
-        }
-      } else {
-        console.log(`ℹ️ CryptoAPIs API key not configured, skipping CryptoAPIs broadcast for ${txName}`);
+      if (readiness.reason?.includes('not configured')) {
+        errorType = 'rpc_not_configured';
+        errorCode = 'RPC_NOT_CONFIGURED';
+      } else if (readiness.reason?.includes('not connected') || readiness.reason?.includes('connection')) {
+        errorType = 'rpc_connection_failed';
+        errorCode = 'RPC_CONNECTION_FAILED';
+      } else if (readiness.reason?.includes('timeout')) {
+        errorType = 'rpc_timeout';
+        errorCode = 'RPC_TIMEOUT';
+      } else if (readiness.reason?.includes('loading') || readiness.reason?.includes('syncing')) {
+        errorType = 'node_syncing';
+        errorCode = 'NODE_SYNCING';
       }
       
-      // Try Mempool.space as secondary fallback (supports testnet4 natively)
-      broadcastUrl = `${MEMEPOOL_BASE_URL}/api/tx`;
-      broadcastService = 'Mempool.space';
-      console.log(`📤 Attempting ${txName} broadcast via ${broadcastService}: ${broadcastUrl}`);
-      
-      try {
-        const response = await axios.post(broadcastUrl, txHex, {
-          timeout: 60000, // 60 second timeout
-          headers: {
-            'Content-Type': 'text/plain',
-          },
-          validateStatus: (status) => status < 500,
-        });
-
-        if (response.status >= 200 && response.status < 300) {
-          // Mempool.space returns transaction ID
-          const txid = typeof response.data === 'string'
-            ? response.data.trim()
-            : response.data?.txid || response.data?.transactionId || String(response.data).trim();
-          
-          if (txid && txid.length > 0) {
-            console.log(`✅ ${txName} broadcast successfully via ${broadcastService}: ${txid}`);
-            return txid;
-          } else {
-            console.error(`❌ Mempool.space ${txName} response structure:`, JSON.stringify(response.data, null, 2));
-            lastError = `Mempool.space returned success but no transaction ID in response`;
-          }
-        } else {
-          const errorMsg = typeof response.data === 'string'
-            ? response.data
-            : response.data?.error || response.data?.message || `Broadcast failed with status ${response.status}`;
-          lastError = `${broadcastService}: ${errorMsg}`;
-          console.warn(`⚠️ ${broadcastService} ${txName} broadcast failed (${response.status}): ${errorMsg}`);
-          
-          // Provide helpful context for common errors
-          if (errorMsg.includes('bad-txns-inputs-missingorspent') || errorMsg.includes('inputs-missingorspent')) {
-            console.warn(`💡 This error means the UTXO you're trying to spend doesn't exist or was already spent.`);
-            console.warn(`   If using Bitcoin Core node, it may not have synced the block containing your UTXO yet.`);
-            console.warn(`   Check sync status: ./monitor-bitcoin-health.sh or ./check-bitcoin-rpc.sh`);
-            console.warn(`   The node needs to sync the block containing your UTXO before it can validate the transaction.`);
-          }
-        }
-      } catch (mempoolError: any) {
-        console.error(`❌ ${broadcastService} ${txName} broadcast error:`);
-        console.error('   Error type:', mempoolError.constructor?.name || typeof mempoolError);
-        console.error('   Error message:', mempoolError.message || 'No error message');
-        console.error('   Error code:', mempoolError.code || 'No error code');
-        if (mempoolError.response) {
-          console.error('   Response status:', mempoolError.response.status);
-          console.error('   Response data:', mempoolError.response.data);
-        }
-        console.error('   Request URL:', broadcastUrl);
-        console.error('   Transaction hex length:', txHex.length);
-        
-        // Try to extract meaningful error message
-        let errorMsg = 'Unknown error';
-        if (mempoolError.response) {
-          if (typeof mempoolError.response.data === 'string') {
-            errorMsg = mempoolError.response.data;
-          } else if (mempoolError.response.data?.error) {
-            errorMsg = mempoolError.response.data.error;
-          } else if (mempoolError.response.data?.message) {
-            errorMsg = mempoolError.response.data.message;
-          } else if (mempoolError.response.data) {
-            errorMsg = JSON.stringify(mempoolError.response.data);
-          }
-          } else {
-            errorMsg = mempoolError.message || mempoolError.code || 'Network error';
-          }
-        
-        // Provide helpful context for sync-related errors
-        if (errorMsg.includes('bad-txns-inputs-missingorspent') || errorMsg.includes('inputs-missingorspent')) {
-          console.error(`💡 The UTXO may not exist or the node hasn't synced enough blocks.`);
-          console.error(`   Check sync status: ./monitor-bitcoin-health.sh`);
-          console.error(`   The node needs to sync the block containing your UTXO before it can validate the transaction.`);
-        }
-        
-        lastError = `${broadcastService}: ${errorMsg}`;
-      }
-      
-      // All broadcasting services failed
-      if (!lastError) {
-        lastError = 'No broadcasting service available';
-      }
-      throw new Error(`All broadcasting endpoints failed for ${txName}. ${lastError}`);
-    };
-
-    // Step 1: Broadcast commit transaction first
-    // The commit transaction creates the Taproot output that the spell transaction spends
-    // Per Charms docs: "Both transactions must be accepted into the mempool to ensure proper processing"
-    console.log('📤 Step 1/2: Broadcasting commit transaction...');
-    let commitTxid: string;
+      return res.status(503).json({
+        error: 'Bitcoin Core RPC is not ready for broadcasting',
+        errorType,
+        errorCode,
+        reason: readiness.reason,
+        message: 'Bitcoin Core node must be ready before broadcasting transaction packages',
+        suggestion: 'Wait for Bitcoin Core to finish syncing or check node status',
+        healthCheck: 'Check /api/broadcast/ready or /api/broadcast/health for current status',
+      });
+    }
+    
+    // Broadcast package via Bitcoin Core RPC
     try {
-      commitTxid = await broadcastSingleTx(commitTxHex, 'commit transaction');
-      console.log(`✅ Commit transaction broadcast successful: ${commitTxid}`);
-    } catch (commitError: any) {
-      // Comprehensive error logging
-      console.error('❌ Commit transaction broadcast failed');
-      console.error('   Error type:', commitError.constructor?.name || typeof commitError);
-      console.error('   Error message:', commitError.message || 'No error message');
-      console.error('   Error code:', commitError.code || 'No error code');
-      console.error('   Error stack:', commitError.stack || 'No stack trace');
+      console.log(`✅ Using Bitcoin Core RPC (healthy): ${readiness.reason}`);
+      const result = await broadcastPackageViaBitcoinRpc(commitTxHex, spellTxHex, bitcoinRpcConfig);
       
-      if (commitError.response) {
-        console.error('   Response status:', commitError.response.status);
-        console.error('   Response headers:', commitError.response.headers);
-        console.error('   Response data:', commitError.response.data);
-        
-        const errorMessage = typeof commitError.response.data === 'string'
-          ? commitError.response.data
-          : commitError.response.data?.error || commitError.response.data?.message || 'Failed to broadcast commit transaction';
-        
-        return res.status(commitError.response.status).json({
-          error: `Commit transaction broadcast failed: ${errorMessage}`,
-          status: commitError.response.status,
-          details: commitError.response.data,
-        });
-      }
-
-      // Network or other errors
-      if (commitError.code === 'ECONNREFUSED') {
-        return res.status(503).json({
-          error: 'Failed to connect to broadcasting service. The service may be unavailable.',
-          message: commitError.message,
-        });
-      }
-
-      if (commitError.code === 'ECONNABORTED' || commitError.message?.includes('timeout')) {
-        return res.status(504).json({
-          error: 'Broadcast request timed out. Please try again.',
-          message: commitError.message,
-        });
-      }
-
-      // Extract error message from various possible formats
-      let errorMsg = 'Unknown error';
-      if (commitError.message) {
-        errorMsg = commitError.message;
-      } else if (typeof commitError === 'string') {
-        errorMsg = commitError;
-      } else if (commitError.toString && commitError.toString() !== '[object Object]') {
-        errorMsg = commitError.toString();
-      } else {
-        errorMsg = JSON.stringify(commitError);
-      }
-
-      return res.status(500).json({
-        error: `Failed to broadcast commit transaction: ${errorMsg}`,
-        errorType: commitError.constructor?.name || typeof commitError,
-        errorCode: commitError.code,
-        fullError: commitError.toString ? commitError.toString() : String(commitError),
+      // Verify both transactions are in mempool
+      console.log('⏳ Verifying both transactions are accepted into mempool...');
+      const commitInMempool = await checkTransactionInMempool(result.commitTxid);
+      const spellInMempool = await checkTransactionInMempool(result.spellTxid);
+      
+      return res.json({
+        commitTxid: result.commitTxid,
+        spellTxid: result.spellTxid,
+        broadcastMethod: 'bitcoin-core-rpc',
+        mempoolStatus: {
+          commitInMempool,
+          spellInMempool,
+        },
       });
-    }
-
-    // Step 2: Rapid sequential broadcasting - immediately attempt spell transaction
-    // Per Charms docs: "Broadcast both transactions together as a package"
-    // Since mempool.space doesn't support true package broadcasting, we broadcast rapidly in sequence
-    // This maximizes the chance both transactions are accepted together
-    console.log('📤 Step 2/2: Broadcasting spell transaction immediately (rapid sequential package broadcast)...');
-    let spellTxid: string | null = null;
-    let spellBroadcastAttempts = 0;
-    const maxSpellRetries = 3;
-    const retryDelays = [0, 1000, 2000]; // Immediate, then 1s, then 2s
-    
-    while (spellBroadcastAttempts < maxSpellRetries && !spellTxid) {
-      try {
-        // Wait a short delay before retry (except first attempt)
-        if (spellBroadcastAttempts > 0) {
-          const delay = retryDelays[spellBroadcastAttempts] || 2000;
-          console.log(`   Retry attempt ${spellBroadcastAttempts + 1}/${maxSpellRetries} after ${delay}ms delay...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          
-          // Check if commit is in mempool before retrying spell
-          const commitInMempool = await checkTransactionInMempool(commitTxid);
-          if (!commitInMempool) {
-            console.warn(`   ⚠️ Commit transaction ${commitTxid} not yet in mempool, waiting briefly...`);
-            const commitAccepted = await waitForMempoolAcceptance(commitTxid, 5000, 500);
-            if (!commitAccepted) {
-              console.warn(`   ⚠️ Commit transaction still not in mempool after wait, proceeding with spell broadcast anyway`);
-            }
-          }
-        }
-        
-        spellTxid = await broadcastSingleTx(spellTxHex, 'spell transaction');
-        console.log(`✅ Spell transaction broadcast successful: ${spellTxid}`);
-        break; // Success, exit retry loop
-      } catch (spellError: any) {
-        spellBroadcastAttempts++;
-        
-        // Check if this is a dependency error (spell transaction references commit output that's not in mempool yet)
-        const isDependencyError = spellError.message?.toLowerCase().includes('orphan') ||
-                                  spellError.message?.toLowerCase().includes('missing') ||
-                                  spellError.message?.toLowerCase().includes('not found') ||
-                                  (spellError.response?.data && 
-                                   (typeof spellError.response.data === 'string' && 
-                                    (spellError.response.data.toLowerCase().includes('orphan') ||
-                                     spellError.response.data.toLowerCase().includes('missing'))));
-        
-        if (isDependencyError && spellBroadcastAttempts < maxSpellRetries) {
-          console.warn(`⚠️ Spell transaction broadcast failed (attempt ${spellBroadcastAttempts}/${maxSpellRetries}): ${spellError.message || 'Dependency error'}`);
-          console.warn(`   This may be because commit transaction is not yet in mempool. Will retry...`);
-          continue; // Retry
-        }
-        
-        // If not a dependency error or last attempt, handle the error
-        if (spellBroadcastAttempts >= maxSpellRetries) {
-          // Last attempt failed - log comprehensive error
-          console.error('❌ Spell transaction broadcast failed after all retry attempts');
-          console.error('   Error type:', spellError.constructor?.name || typeof spellError);
-          console.error('   Error message:', spellError.message || 'No error message');
-          console.error('   Error code:', spellError.code || 'No error code');
-          console.error('   Error stack:', spellError.stack || 'No stack trace');
-          console.error('   Commit txid (already broadcast):', commitTxid);
-          console.error(`   Total attempts: ${spellBroadcastAttempts}/${maxSpellRetries}`);
-          
-          // Even if spell broadcast fails, we return the commit txid so the user knows what happened
-          if (spellError.response) {
-            console.error('   Response status:', spellError.response.status);
-            console.error('   Response headers:', spellError.response.headers);
-            console.error('   Response data:', spellError.response.data);
-            
-            const errorMessage = typeof spellError.response.data === 'string'
-              ? spellError.response.data
-              : spellError.response.data?.error || spellError.response.data?.message || 'Failed to broadcast spell transaction';
-            
-            return res.status(spellError.response.status).json({
-              error: `Spell transaction broadcast failed after ${maxSpellRetries} attempts: ${errorMessage}`,
-              commitTxid, // Return commit txid even if spell failed
-              status: spellError.response.status,
-              details: spellError.response.data,
-            });
-          }
-
-          // Network or other errors
-          if (spellError.code === 'ECONNREFUSED') {
-            return res.status(503).json({
-              error: 'Failed to connect to broadcasting service. The service may be unavailable.',
-              message: spellError.message,
-              commitTxid, // Return commit txid even if spell failed
-            });
-          }
-
-          if (spellError.code === 'ECONNABORTED' || spellError.message?.includes('timeout')) {
-            return res.status(504).json({
-              error: 'Broadcast request timed out. Please try again.',
-              message: spellError.message,
-              commitTxid, // Return commit txid even if spell failed
-            });
-          }
-
-          // Extract error message from various possible formats
-          let errorMsg = 'Unknown error';
-          if (spellError.message) {
-            errorMsg = spellError.message;
-          } else if (typeof spellError === 'string') {
-            errorMsg = spellError;
-          } else if (spellError.toString && spellError.toString() !== '[object Object]') {
-            errorMsg = spellError.toString();
-          } else {
-            errorMsg = JSON.stringify(spellError);
-          }
-
-          return res.status(500).json({
-            error: `Failed to broadcast spell transaction after ${maxSpellRetries} attempts: ${errorMsg}`,
-            errorType: spellError.constructor?.name || typeof spellError,
-            errorCode: spellError.code,
-            fullError: spellError.toString ? spellError.toString() : String(spellError),
-            commitTxid, // Return commit txid even if spell failed
-          });
-        } else {
-          // Not a dependency error, but we have retries left - this shouldn't happen often
-          throw spellError; // Re-throw to be caught by outer handler
-        }
+    } catch (rpcError: any) {
+      console.error(`❌ Bitcoin Core RPC package broadcast failed: ${rpcError.message}`);
+      
+      // Determine error type and code
+      let errorType = 'rpc_error';
+      let errorCode = 'RPC_ERROR';
+      let troubleshooting: string[] = [];
+      
+      if (rpcError.message?.includes('connection refused') || rpcError.message?.includes('ECONNREFUSED')) {
+        errorType = 'rpc_connection_failed';
+        errorCode = 'RPC_CONNECTION_FAILED';
+        troubleshooting = [
+          'Check if node is running: ps aux | grep bitcoind',
+          'Node may still be starting - wait 30-60 seconds',
+          'Run diagnostic: ./check-bitcoin-rpc.sh',
+          'Check RPC config: cat ~/.bitcoin/testnet4/bitcoin.conf | grep rpc',
+        ];
+      } else if (rpcError.message?.includes('timeout')) {
+        errorType = 'rpc_timeout';
+        errorCode = 'RPC_TIMEOUT';
+        troubleshooting = [
+          'Node may be overloaded or still syncing',
+          'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+        ];
+      } else if (rpcError.isSyncIssue ||
+                 rpcError.errorType === 'sync_required' ||
+                 rpcError.errorType === 'utxo_not_synced' ||
+                 (rpcError.message?.includes('bad-txns-inputs-missingorspent') && rpcError.fallbackError?.includes('bad-txns-inputs-missingorspent'))) {
+        errorType = 'sync_required';
+        errorCode = 'SYNC_REQUIRED';
+        troubleshooting = [
+          'Bitcoin Core hasn\'t synced enough blocks to have the UTXO data needed',
+          'The commit transaction spends a UTXO that Bitcoin Core hasn\'t downloaded yet',
+          'This is a sync issue - you need to wait for Bitcoin Core to sync more blocks',
+          'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health',
+          'The node is currently ~60% synced - it needs to sync blocks containing your UTXO',
+        ];
+      } else if (rpcError.message?.includes('bad-txns-inputs-missingorspent') || rpcError.message?.includes('inputs-missingorspent')) {
+        errorType = 'utxo_not_found';
+        errorCode = 'UTXO_NOT_FOUND';
+        troubleshooting = [
+          'Node may not have synced enough blocks yet',
+          'The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded',
+          'Wait for node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)',
+          'Check sync status: bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
+        ];
+      } else if (rpcError.message?.includes('package topology') || 
+                 rpcError.message?.includes('topology disallowed') ||
+                 rpcError.message?.includes('error (-25)') ||
+                 rpcError.errorType === 'package_topology_error') {
+        errorType = 'package_topology_error';
+        errorCode = 'PACKAGE_TOPOLOGY_ERROR';
+        troubleshooting = [
+          'Package topology error - the commit transaction must create an output that the spell transaction spends',
+          'This can happen if:',
+          '  1. Bitcoin Core hasn\'t synced enough blocks to verify the relationship',
+          '  2. The commit transaction spends UTXOs not yet in the node\'s view',
+          '  3. The transactions are not properly linked (spell doesn\'t spend commit output)',
+          'The system attempted sequential submission as fallback - check if transactions were submitted individually',
+        ];
       }
-    }
-    
-    // Verify spell transaction was successfully broadcast
-    if (!spellTxid) {
-      // This shouldn't happen if all error paths return, but TypeScript needs this check
-      return res.status(500).json({
-        error: 'Spell transaction broadcast failed: Unknown error after all retry attempts',
-        commitTxid, // Return commit txid even if spell failed
-      });
-    }
-
-    // Step 3: Verify both transactions are in mempool
-    // Per Charms docs: "Both transactions must be accepted into the mempool to ensure proper processing"
-    console.log('⏳ Verifying both transactions are accepted into mempool...');
-    const commitInMempool = await checkTransactionInMempool(commitTxid);
-    const spellInMempool = await checkTransactionInMempool(spellTxid);
-    
-    if (commitInMempool && spellInMempool) {
-      console.log(`✅ Package broadcast successful: both transactions confirmed in mempool`);
-      console.log(`   Commit txid: ${commitTxid}`);
-      console.log(`   Spell txid: ${spellTxid}`);
-    } else {
-      console.warn(`⚠️ Package broadcast completed, but mempool verification incomplete:`);
-      if (!commitInMempool) {
-        console.warn(`   ⚠️ Commit transaction ${commitTxid} not yet in mempool`);
+      
+      // Include diagnostics if available
+      const response: any = {
+        error: 'Bitcoin Core RPC package broadcast failed',
+        errorType,
+        errorCode,
+        message: rpcError.message || 'Unknown error',
+        troubleshooting,
+        healthCheck: 'Check /api/broadcast/health for node status',
+      };
+      
+      // Add diagnostics if available
+      if (rpcError.diagnostics) {
+        response.diagnostics = rpcError.diagnostics;
       }
-      if (!spellInMempool) {
-        console.warn(`   ⚠️ Spell transaction ${spellTxid} not yet in mempool`);
+      
+      // Add original and fallback errors if available
+      if (rpcError.originalError) {
+        response.originalError = rpcError.originalError;
       }
-      console.warn(`   Transactions may still be propagating. Check mempool.space for status.`);
+      if (rpcError.fallbackError) {
+        response.fallbackError = rpcError.fallbackError;
+      }
+      
+      return res.status(500).json(response);
     }
-    
-    // Return both transaction IDs
-    return res.json({
-      commitTxid,
-      spellTxid,
-      broadcastMethod: 'sequential', // Sequential broadcasting (CryptoAPIs → Mempool.space)
-      mempoolStatus: {
-        commitInMempool,
-        spellInMempool,
-      },
-    });
   } catch (error: any) {
-    // Comprehensive error logging for outer catch block
+    // Comprehensive error logging
     console.error('❌ Error broadcasting transaction package');
     console.error('   Error type:', error.constructor?.name || typeof error);
     console.error('   Error message:', error.message || 'No error message');
     console.error('   Error code:', error.code || 'No error code');
-    console.error('   Error stack:', error.stack || 'No stack trace');
-
-    if (error.response) {
-      console.error('   Response status:', error.response.status);
-      console.error('   Response headers:', error.response.headers);
-      console.error('   Response data:', error.response.data);
-      
-      return res.status(error.response.status).json({
-        error: error.response.data?.error || error.response.data?.message || 'Failed to broadcast transaction package',
-        status: error.response.status,
-        details: error.response.data,
-      });
-    }
-
-    // Network or other errors
-    if (error.code === 'ECONNREFUSED') {
-      return res.status(503).json({
-        error: 'Failed to connect to broadcasting service. The service may be unavailable.',
-        message: error.message,
-      });
-    }
-
-    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-      return res.status(504).json({
-        error: 'Broadcast request timed out. Please try again.',
-        message: error.message,
-      });
-    }
 
     // Extract error message from various possible formats
     let errorMsg = 'Unknown error';
@@ -1707,6 +1465,26 @@ router.post('/package', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/broadcast/ready
+ * Quick check if Bitcoin Core is ready for broadcasting
+ * Returns simple JSON: { ready: boolean, reason?: string }
+ */
+router.get('/ready', async (req: Request, res: Response) => {
+  try {
+    const readiness = await isBitcoinCoreReady();
+    return res.json({
+      ready: readiness.ready,
+      reason: readiness.reason,
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      ready: false,
+      reason: error.message || 'Error checking Bitcoin Core readiness',
+    });
+  }
+});
+
+/**
  * GET /api/broadcast/health
  * Check Bitcoin Core RPC node health status with diagnostic information
  */
@@ -1719,6 +1497,8 @@ router.get('/health', async (req: Request, res: Response) => {
         status: 'not_configured',
         message: 'Bitcoin Core RPC not configured (BITCOIN_RPC_URL not set)',
         rpcConfigured: false,
+        ready: false,
+        fallbackEnabled: false,
         diagnostics: {
           suggestion: 'Set BITCOIN_RPC_URL in your .env file to enable package broadcasting',
           example: 'BITCOIN_RPC_URL=http://user:password@localhost:18332',
@@ -1727,36 +1507,38 @@ router.get('/health', async (req: Request, res: Response) => {
     }
 
     const health = await getBitcoinNodeHealth(bitcoinRpcConfig);
-    
+    const readiness = await isBitcoinCoreReady(bitcoinRpcConfig);
+
+    if (health.connected && health.loading) {
+      return res.json({
+        status: 'loading',
+        message: 'Bitcoin Core RPC is connected but node is still loading block index',
+        rpcConfigured: true,
+        connected: true,
+        ready: false,
+        loading: true,
+        fallbackEnabled: false,
+        diagnostics: {
+          note: health.error || 'Node is initializing. This is normal after starting Bitcoin Core.',
+          progress: 'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+          estimatedTime: 'Loading typically takes a few minutes depending on blockchain size',
+        },
+      });
+    }
+
     if (!health.connected) {
-      // Provide detailed diagnostic information
-      const errorMsg = health.error || 'Unknown error';
-      let diagnostics: any = {
-        error: errorMsg,
-        troubleshooting: [],
+      const diagnostics: any = {
+        suggestion: 'Bitcoin Core RPC is not available. Check if the node is running.',
+        troubleshooting: [
+          'Verify Bitcoin Core is running: ps aux | grep bitcoind',
+          'Check RPC connection: ./check-bitcoin-rpc.sh',
+          'Verify BITCOIN_RPC_URL in .env matches your Bitcoin Core configuration',
+          'Check Bitcoin Core logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+        ],
       };
 
-      // Provide specific suggestions based on error type
-      if (errorMsg.includes('connection refused') || errorMsg.includes('ECONNREFUSED')) {
-        diagnostics.troubleshooting = [
-          'Bitcoin Core node may not be running. Check with: ps aux | grep bitcoind',
-          'Node may still be starting up. Wait 30-60 seconds and try again.',
-          'RPC may not be enabled. Check bitcoin.conf has: server=1, rpcuser=..., rpcpassword=..., rpcport=18332',
-          'Run diagnostic script: ./check-bitcoin-rpc.sh',
-        ];
-        diagnostics.checkNode = 'Run: bitcoind -testnet -datadir=$HOME/.bitcoin/testnet4 -daemon';
-      } else if (errorMsg.includes('authentication') || errorMsg.includes('401') || errorMsg.includes('403')) {
-        diagnostics.troubleshooting = [
-          'RPC credentials may be incorrect. Verify username and password match bitcoin.conf',
-          'Check that BITCOIN_RPC_URL in .env matches the credentials in bitcoin.conf',
-          'Verify rpcuser and rpcpassword in: ~/.bitcoin/testnet4/bitcoin.conf',
-        ];
-      } else if (errorMsg.includes('timeout') || errorMsg.includes('ECONNABORTED')) {
-        diagnostics.troubleshooting = [
-          'Node may be overloaded or slow to respond',
-          'Check node logs: tail -f ~/.bitcoin/testnet4/debug.log',
-          'Node may still be syncing and processing blocks',
-        ];
+      if (health.error) {
+        diagnostics.error = health.error;
       }
 
       return res.status(503).json({
@@ -1764,28 +1546,44 @@ router.get('/health', async (req: Request, res: Response) => {
         message: 'Bitcoin Core RPC node is not available',
         rpcConfigured: true,
         connected: false,
+        ready: false,
+        fallbackEnabled: false,
         diagnostics,
       });
     }
 
-    // Determine overall health status
     const isSynced = !health.blockchain?.initialBlockDownload;
     const hasConnections = (health.network?.connections || 0) > 0;
     const isHealthy = isSynced && hasConnections;
 
-    // Calculate sync progress
-    const syncProgress = health.blockchain?.headers 
+    const syncProgress = health.blockchain?.headers
       ? ((health.blockchain.blocks / health.blockchain.headers) * 100).toFixed(1)
       : null;
 
+    let estimatedTimeToReady = null;
+    if (!isSynced && health.blockchain?.headers && health.blockchain?.blocks) {
+      const remainingBlocks = health.blockchain.headers - health.blockchain.blocks;
+      // Assuming average block time for testnet is 2.5 minutes (150 seconds)
+      // This is a rough estimate and can vary greatly
+      const estimatedSeconds = remainingBlocks * 150;
+      const minutes = Math.ceil(estimatedSeconds / 60);
+      if (minutes > 60) {
+        estimatedTimeToReady = `${Math.ceil(minutes / 60)} hours`;
+      } else {
+        estimatedTimeToReady = `${minutes} minutes`;
+      }
+    }
+
     return res.json({
       status: isHealthy ? 'healthy' : 'syncing',
-      message: isHealthy 
+      message: isHealthy
         ? 'Bitcoin Core node is fully synced and ready'
         : 'Bitcoin Core node is syncing (still usable for recent transactions)',
       rpcConfigured: true,
       connected: true,
-      ready: isHealthy,
+      ready: readiness.ready,
+      loading: false,
+      fallbackEnabled: false,
       blockchain: {
         ...health.blockchain,
         syncProgress: syncProgress ? `${syncProgress}%` : null,
@@ -1793,27 +1591,19 @@ router.get('/health', async (req: Request, res: Response) => {
       network: health.network,
       mempool: health.mempool,
       diagnostics: {
-        note: isHealthy 
+        note: readiness.ready
           ? 'Node is ready for package broadcasting'
           : 'Node is syncing but can still process recent transactions. Package broadcasting may work but may have limitations.',
+        estimatedTimeToReady: estimatedTimeToReady,
       },
     });
   } catch (error: any) {
     return res.status(500).json({
       status: 'error',
-      message: 'Error checking Bitcoin Core node health',
-      error: error.message || String(error),
-      diagnostics: {
-        suggestion: 'Check server logs for more details',
-        troubleshooting: [
-          'Verify Bitcoin Core is running: ps aux | grep bitcoind',
-          'Check RPC configuration in .env file',
-          'Run diagnostic script: ./check-bitcoin-rpc.sh',
-        ],
-      },
+      message: error.message || 'Error checking Bitcoin Core health',
+      error: error.toString ? error.toString() : String(error),
     });
   }
 });
 
 export default router;
-

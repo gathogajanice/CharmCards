@@ -31,17 +31,22 @@ pub fn app_contract(app: &App, tx: &Transaction, x: &Data, w: &Data) -> bool {
 
 // Gift card NFT contract: allows minting new gift cards or transferring existing ones
 fn nft_contract_satisfied(app: &App, tx: &Transaction, w: &Data) -> bool {
-    let token_app = &App {
+    // Check minting first (most common operation) for early return
+    if can_mint_gift_card_nft(app, tx, w) {
+        return true;
+    }
+    
+    // Create token_app once and reuse
+    let token_app = App {
         tag: TOKEN,
         identity: app.identity.clone(),
         vk: app.vk.clone(),
     };
     
-    // Allow minting new gift card NFT, transferring existing NFT, redeeming, or burning
-    check!(can_mint_gift_card_nft(app, tx, w) || 
-           can_transfer_gift_card_nft(app, tx) ||
-           can_redeem_gift_card(app, tx, token_app) ||
-           can_burn_gift_card(app, tx, token_app));
+    // Check other operations in order of likelihood
+    check!(can_transfer_gift_card_nft(app, tx) ||
+           can_redeem_gift_card(app, tx, &token_app) ||
+           can_burn_gift_card(app, tx, &token_app));
     true
 }
 
@@ -51,20 +56,28 @@ fn can_mint_gift_card_nft(nft_app: &App, tx: &Transaction, w: &Data) -> bool {
     check!(w_str.is_some());
     let w_str = w_str.unwrap();
 
-    // App identity must match hash of the funding UTXO
+    // App identity must match hash of the funding UTXO (check early)
     check!(hash(&w_str) == nft_app.identity);
 
-    // Must be spending the UTXO specified in `w`
+    // Must be spending the UTXO specified in `w` (check early)
     let w_utxo_id = UtxoId::from_str(&w_str).unwrap();
-    check!(tx.ins.iter().any(|(utxo_id, _)| utxo_id == &w_utxo_id));
+    if !tx.ins.iter().any(|(utxo_id, _)| utxo_id == &w_utxo_id) {
+        return false;
+    }
 
-    let nft_charms = charm_values(nft_app, tx.outs.iter()).collect::<Vec<_>>();
-
-    // Must mint exactly one NFT
-    check!(nft_charms.len() == 1);
+    // Use iterator to find first NFT output instead of collecting all
+    let mut nft_iter = charm_values(nft_app, tx.outs.iter());
+    let Some(first_nft) = nft_iter.next() else {
+        return false;
+    };
+    
+    // Must mint exactly one NFT (check if there's a second one)
+    if nft_iter.next().is_some() {
+        return false;
+    }
     
     // Verify NFT has correct gift card structure
-    let nft_content: GiftCardNftContent = match nft_charms[0].value() {
+    let nft_content: GiftCardNftContent = match first_nft.value() {
         Ok(content) => content,
         Err(_) => return false,
     };
@@ -80,16 +93,24 @@ fn can_mint_gift_card_nft(nft_app: &App, tx: &Transaction, w: &Data) -> bool {
 
 // Transfer gift card NFT (full transfer to new owner)
 fn can_transfer_gift_card_nft(nft_app: &App, tx: &Transaction) -> bool {
+    // Collect NFTs more efficiently with size hints
     let input_nfts: Vec<GiftCardNftContent> = charm_values(nft_app, tx.ins.iter().map(|(_, v)| v))
         .filter_map(|data| data.value().ok())
         .collect();
+    
+    // Early return if no input NFTs
+    if input_nfts.is_empty() {
+        return false;
+    }
     
     let output_nfts: Vec<GiftCardNftContent> = charm_values(nft_app, tx.outs.iter())
         .filter_map(|data| data.value().ok())
         .collect();
     
     // Must have same number of NFTs in and out (transfer, not mint/burn)
-    check!(input_nfts.len() == output_nfts.len() && input_nfts.len() > 0);
+    if input_nfts.len() != output_nfts.len() {
+        return false;
+    }
     
     // Remaining balance must be preserved during transfer
     let input_balance: u64 = input_nfts.iter().map(|nft| nft.remaining_balance).sum();
@@ -112,6 +133,7 @@ fn token_contract_satisfied(token_app: &App, tx: &Transaction) -> bool {
 
 // Mint initial tokens when gift card NFT is created
 fn can_mint_initial_tokens(token_app: &App, tx: &Transaction) -> bool {
+    // Create nft_app once
     let nft_app = App {
         tag: NFT,
         identity: token_app.identity.clone(),
@@ -119,51 +141,49 @@ fn can_mint_initial_tokens(token_app: &App, tx: &Transaction) -> bool {
     };
 
     // Check if we're minting a new gift card NFT
-    let output_nfts: Vec<GiftCardNftContent> = charm_values(&nft_app, tx.outs.iter())
-        .filter_map(|data| data.value().ok())
-        .collect();
+    // First check if there are output NFTs
+    let mut output_nft_iter = charm_values(&nft_app, tx.outs.iter())
+        .filter_map(|data| data.value::<GiftCardNftContent>().ok());
     
-    // If minting NFT, we can mint corresponding tokens
-    if output_nfts.len() > 0 && tx.ins.iter().all(|(_, v)| {
-        charm_values(&nft_app, std::iter::once(v)).next().is_none()
-    }) {
-        // Minting new NFT, so we can mint initial tokens
-        let Some(input_token_amount) = sum_token_amount(token_app, tx.ins.iter().map(|(_, v)| v)).ok() else {
-            return false; // No input tokens means we're minting
-        };
-        check!(input_token_amount == 0); // No existing tokens
-        
-        let Some(output_token_amount) = sum_token_amount(token_app, tx.outs.iter()).ok() else {
-            return false;
-        };
-        
-        // Token amount must match NFT's initial_amount
-        let nft_initial = output_nfts[0].initial_amount;
-        check!(output_token_amount == nft_initial);
-        
-        return true;
+    let Some(first_output_nft): Option<GiftCardNftContent> = output_nft_iter.next() else {
+        return false; // No output NFTs
+    };
+    
+    // Check if there are no input NFTs (minting, not transferring)
+    let has_input_nfts = tx.ins.iter().any(|(_, v)| {
+        charm_values(&nft_app, std::iter::once(v)).next().is_some()
+    });
+    
+    if has_input_nfts {
+        return false; // Not minting, has input NFTs
     }
     
-    false
+    // Minting new NFT, so we can mint initial tokens
+    let Some(input_token_amount) = sum_token_amount(token_app, tx.ins.iter().map(|(_, v)| v)).ok() else {
+        return false; // No input tokens means we're minting
+    };
+    check!(input_token_amount == 0); // No existing tokens
+    
+    let Some(output_token_amount) = sum_token_amount(token_app, tx.outs.iter()).ok() else {
+        return false;
+    };
+    
+    // Token amount must match NFT's initial_amount
+    check!(output_token_amount == first_output_nft.initial_amount);
+    
+    true
 }
 
 // Transfer tokens (partial or full transfer of gift card balance)
 fn can_transfer_tokens(token_app: &App, tx: &Transaction) -> bool {
+    // Create nft_app once
     let nft_app = App {
         tag: NFT,
         identity: token_app.identity.clone(),
         vk: token_app.vk.clone(),
     };
 
-    // Get NFT content to check balance constraints
-    let input_nfts: Vec<GiftCardNftContent> = charm_values(&nft_app, tx.ins.iter().map(|(_, v)| v))
-        .filter_map(|data| data.value().ok())
-        .collect();
-    
-    let output_nfts: Vec<GiftCardNftContent> = charm_values(&nft_app, tx.outs.iter())
-        .filter_map(|data| data.value().ok())
-        .collect();
-
+    // Check token balance conservation first (most common check)
     let Some(input_token_amount) = sum_token_amount(token_app, tx.ins.iter().map(|(_, v)| v)).ok() else {
         return false;
     };
@@ -172,13 +192,23 @@ fn can_transfer_tokens(token_app: &App, tx: &Transaction) -> bool {
     };
 
     // Token balance must be conserved (no minting/burning except during initial mint)
-    check!(input_token_amount == output_token_amount);
+    if input_token_amount != output_token_amount {
+        return false;
+    }
     
-    // If NFTs are present, their remaining_balance must match token amounts
+    // Only check NFT balances if NFTs are present (lazy evaluation)
+    let input_nfts: Vec<GiftCardNftContent> = charm_values(&nft_app, tx.ins.iter().map(|(_, v)| v))
+        .filter_map(|data| data.value().ok())
+        .collect();
+    
     if !input_nfts.is_empty() {
         let input_nft_balance: u64 = input_nfts.iter().map(|nft| nft.remaining_balance).sum();
         check!(input_nft_balance == input_token_amount);
     }
+    
+    let output_nfts: Vec<GiftCardNftContent> = charm_values(&nft_app, tx.outs.iter())
+        .filter_map(|data| data.value().ok())
+        .collect();
     
     if !output_nfts.is_empty() {
         let output_nft_balance: u64 = output_nfts.iter().map(|nft| nft.remaining_balance).sum();

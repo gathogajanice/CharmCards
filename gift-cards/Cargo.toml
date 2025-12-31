@@ -11,7 +11,15 @@ serde = { version = "1.0", features = ["derive"] }
 sha2 = { version = "0.10.9" }
 
 [profile.release]
+# Optimization level: 3 = maximum speed (best for WASM performance)
+opt-level = 3
+# Link-time optimization: fat = maximum optimization across crates
 lto = "fat"
+# Single codegen unit for better optimization
 codegen-units = 1
+# Strip symbols to reduce binary size
 strip = "symbols"
+# Abort on panic for smaller binary (no unwinding)
 panic = "abort"
+# Enable overflow checks in debug, disable in release for performance
+overflow-checks = false
