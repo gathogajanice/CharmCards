@@ -49,6 +49,87 @@ const dotenv = __importStar(require("dotenv"));
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
+/**
+ * Validate that proof transactions have correct package topology
+ * The spell transaction must spend at least one output from the commit transaction
+ *
+ * @param commitTxHex Commit transaction hex
+ * @param spellTxHex Spell transaction hex
+ * @param network Bitcoin network (testnet4, testnet, or mainnet)
+ * @returns Validation result with diagnostics
+ */
+async function validateProofTransactions(commitTxHex, spellTxHex, network = 'testnet4') {
+    try {
+        const bitcoin = await Promise.resolve().then(() => __importStar(require('bitcoinjs-lib')));
+        const bitcoinNetwork = network === 'testnet4' || network === 'testnet'
+            ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
+            : bitcoin.networks.bitcoin;
+        // Parse commit transaction
+        const commitTx = bitcoin.Transaction.fromHex(commitTxHex.trim());
+        const commitTxid = commitTx.getId();
+        // Parse spell transaction
+        const spellTx = bitcoin.Transaction.fromHex(spellTxHex.trim());
+        const spellTxid = spellTx.getId();
+        // Extract commit transaction outputs (these are what spell should spend)
+        const commitOutputHashes = [];
+        for (let i = 0; i < commitTx.outs.length; i++) {
+            commitOutputHashes.push(`${commitTxid}:${i}`);
+        }
+        // Extract commit transaction inputs (for diagnostics)
+        const commitInputHashes = [];
+        for (let i = 0; i < commitTx.ins.length; i++) {
+            const input = commitTx.ins[i];
+            const hashBuffer = Buffer.from(input.hash);
+            const txid = hashBuffer.reverse().toString('hex');
+            const vout = input.index;
+            commitInputHashes.push(`${txid}:${vout}`);
+        }
+        // Extract spell transaction inputs and check if any reference commit outputs
+        const spellInputHashes = [];
+        let matchingInputs = 0;
+        for (let i = 0; i < spellTx.ins.length; i++) {
+            const input = spellTx.ins[i];
+            const hashBuffer = Buffer.from(input.hash);
+            const txid = hashBuffer.reverse().toString('hex');
+            const vout = input.index;
+            const inputRef = `${txid}:${vout}`;
+            spellInputHashes.push(inputRef);
+            // Check if this input references a commit output
+            if (commitOutputHashes.includes(inputRef)) {
+                matchingInputs++;
+            }
+        }
+        const diagnostics = {
+            commitTxid,
+            commitInputs: commitTx.ins.length,
+            commitOutputs: commitTx.outs.length,
+            spellInputs: spellTx.ins.length,
+            spellOutputs: spellTx.outs.length,
+            matchingInputs,
+            commitOutputHashes,
+            spellInputHashes,
+            commitInputHashes,
+        };
+        // Package topology is valid if spell transaction has at least one input that references commit output
+        if (matchingInputs > 0) {
+            return {
+                valid: true,
+                diagnostics,
+            };
+        }
+        return {
+            valid: false,
+            reason: `Spell transaction does not spend any output from commit transaction. Commit TX ${commitTxid} creates ${commitTx.outs.length} output(s) [${commitOutputHashes.join(', ')}], but spell TX ${spellTxid} has ${spellTx.ins.length} input(s) [${spellInputHashes.join(', ')}] and none match.`,
+            diagnostics,
+        };
+    }
+    catch (error) {
+        return {
+            valid: false,
+            reason: `Failed to validate proof transactions: ${error.message}`,
+        };
+    }
+}
 class CharmsService {
     constructor() {
         // Ensure .env is loaded (in case constructor is called before server.ts loads it)
@@ -89,12 +170,30 @@ class CharmsService {
      * Build the Charms app binary
      */
     async buildApp() {
+        const buildStartTime = Date.now();
         try {
-            const { stdout } = await execAsync(`cd ${this.appPath} && unset CARGO_TARGET_DIR && charms app build`);
+            console.log('⏱️  Starting WASM build (release mode with optimizations)...');
+            const { stdout, stderr } = await execAsync(`cd ${this.appPath} && unset CARGO_TARGET_DIR && charms app build`);
+            const buildDuration = Date.now() - buildStartTime;
+            console.log(`⏱️  WASM build completed in ${buildDuration}ms (${(buildDuration / 1000).toFixed(1)}s)`);
+            if (stderr && stderr.trim().length > 0) {
+                // Log build warnings but don't fail
+                console.log(`   Build stderr: ${stderr.substring(0, 200)}...`);
+            }
             const appBin = stdout.trim();
+            // Verify it's a release build (should be in target/wasm32-wasip1/release/)
+            if (appBin.includes('/release/')) {
+                console.log('✅ Verified: Using release build (optimized)');
+            }
+            else if (appBin.includes('/debug/')) {
+                console.warn('⚠️  Warning: Using debug build (not optimized). Performance will be slower.');
+                console.warn('   Consider building in release mode for better performance.');
+            }
             return appBin;
         }
         catch (error) {
+            const buildDuration = Date.now() - buildStartTime;
+            console.error(`❌ Build failed after ${buildDuration}ms (${(buildDuration / 1000).toFixed(1)}s)`);
             throw new Error(`Failed to build app: ${error.message}`);
         }
     }
@@ -342,17 +441,62 @@ class CharmsService {
             }
             // Build binaries object
             // Per official documentation: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/
-            // Use empty object {} when no binary is available (matches official docs example)
+            // The Prover API requires binaries - the key should match the app ID from the spell's apps field
+            // Error shows it's looking for: "n/identity/vk" format (full app ID from spell)
             const binaries = {};
-            if (mockMode) {
-                console.log('ℹ️ Mock mode enabled - using empty binaries object {} (per official docs)');
-            }
-            else if (appBin && this.appVk) {
-                // TODO: When binary is available, add it: { [app_vk]: base64_encoded_binary }
-                console.warn('⚠️ App binary available but encoding not implemented - using empty binaries object');
+            if (appBin) {
+                try {
+                    // Resolve the appBin path relative to appPath if it's a relative path
+                    // buildApp() returns paths like "./target/..." relative to gift-cards/
+                    let resolvedAppBin;
+                    if (path.isAbsolute(appBin)) {
+                        resolvedAppBin = appBin;
+                    }
+                    else {
+                        // Resolve relative to appPath (gift-cards directory)
+                        // appPath is relative to api/ directory, so resolve from api/ context
+                        const apiDir = path.resolve(__dirname, '..');
+                        resolvedAppBin = path.resolve(apiDir, this.appPath, appBin);
+                    }
+                    console.log(`📦 Reading WASM binary from: ${resolvedAppBin}`);
+                    // Read the WASM file and base64 encode it
+                    const wasmBuffer = await fs.readFile(resolvedAppBin);
+                    const base64Wasm = wasmBuffer.toString('base64');
+                    // The Prover API expects binaries keyed by the app ID from the spell's apps field
+                    // Example: apps.$00 = "n/identity/vk" -> binaries["n/identity/vk"] = base64_wasm
+                    if (spellObj.apps && typeof spellObj.apps === 'object') {
+                        Object.values(spellObj.apps).forEach((appId) => {
+                            const appIdStr = String(appId);
+                            // Add the binary for each app ID referenced in the spell
+                            binaries[appIdStr] = base64Wasm;
+                            console.log(`✅ Added binary for app: ${appIdStr.substring(0, 40)}...`);
+                        });
+                    }
+                    else {
+                        // Fallback: if we can't find app IDs, use the VK as key
+                        if (this.appVk) {
+                            binaries[this.appVk] = base64Wasm;
+                            console.log(`✅ Added binary using VK as key: ${this.appVk.substring(0, 16)}...`);
+                        }
+                    }
+                    console.log(`✅ Binaries object populated with ${Object.keys(binaries).length} entry/entries (WASM size: ${base64Wasm.length} chars base64)`);
+                }
+                catch (binError) {
+                    console.error(`❌ Failed to read/encode app binary: ${binError.message}`);
+                    if (!mockMode) {
+                        throw new Error(`Failed to include app binary: ${binError.message}`);
+                    }
+                    console.warn('⚠️ Continuing without binary (mock mode may still fail)');
+                }
             }
             else {
-                console.log('ℹ️ No app binary available - using empty binaries object {} (per official docs)');
+                console.warn('⚠️ No app binary provided - Prover API will likely reject the request');
+                if (!mockMode) {
+                    throw new Error('App binary is required but not provided. Build the app first or enable MOCK_MODE.');
+                }
+            }
+            if (mockMode) {
+                console.log(`ℹ️ Mock mode enabled - binaries: ${Object.keys(binaries).length > 0 ? `${Object.keys(binaries).length} entry/entries` : 'empty (will cause errors)'}`);
             }
             // Ensure version is 8 in the spell object (not at top level per reference implementation)
             if (!spellObj.version) {
@@ -460,6 +604,19 @@ class CharmsService {
                     console.log(`   Output ${i}: address=${out.address?.substring(0, 20)}..., sats=${out.sats || 'MISSING'}, charms=${Object.keys(out.charms || {}).length}`);
                 });
             }
+            // Investigate spell structure for package topology
+            console.log('🔍 Investigating spell structure for package topology...');
+            console.log(`   Spell inputs (${spellObj.ins?.length || 0}):`);
+            if (spellObj.ins && Array.isArray(spellObj.ins)) {
+                spellObj.ins.forEach((input, i) => {
+                    console.log(`     Input ${i}: utxo_id=${input.utxo_id || 'MISSING'}, charms=${Object.keys(input.charms || {}).length}`);
+                });
+            }
+            console.log(`   Note: In Charms protocol, the spell should reference the commit transaction's output.`);
+            console.log(`   However, the commit transaction doesn't exist yet when creating the spell.`);
+            console.log(`   The Prover API should generate: (1) commit TX spending original UTXO, (2) spell TX spending commit output.`);
+            console.log(`   Current spell references original UTXO: ${spellObj.ins?.[0]?.utxo_id || 'unknown'}`);
+            console.log(`   This is correct - the Prover API will handle creating the commit TX and making spell spend it.`);
             // Final safety check: Ensure prev_txs is in enum variant format (API requirement)
             // API error confirms: "expected `bitcoin` or `cardano`" - this is Rust enum deserialization
             if (payload.prev_txs && Array.isArray(payload.prev_txs)) {
@@ -607,10 +764,13 @@ class CharmsService {
             const useCli = process.env.USE_CHARMS_CLI !== 'false'; // Default to true
             if (useCli) {
                 try {
+                    const cliStartTime = Date.now();
                     console.log('🔧 Attempting to use charms spell prove CLI command...');
                     // Prepare spell YAML file temporarily
                     const tempSpellPath = path.join(this.appPath, '.temp-spell.yaml');
+                    const fileWriteStart = Date.now();
                     await fs.writeFile(tempSpellPath, spellYaml, 'utf-8');
+                    console.log(`   ⏱️  File write: ${Date.now() - fileWriteStart}ms`);
                     // Build command arguments for charms spell prove
                     // Note: CLI expects comma-separated hex strings for prev_txs (raw hex, not enum variant)
                     // Extract hex strings from enum variant format
@@ -636,9 +796,20 @@ class CharmsService {
                     }
                     const command = `cd ${this.appPath} && charms ${cliArgs.join(' ')}`;
                     console.log(`   Running: charms ${cliArgs.join(' ')}`);
-                    const { stdout, stderr } = await execAsync(command, {
+                    console.log(`   ⏱️  Starting proof generation (this may take 30-120 seconds)...`);
+                    // Add timeout wrapper for CLI command (180 seconds)
+                    const timeoutPromise = new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error('CLI command timed out after 180 seconds')), 180000);
+                    });
+                    const execPromise = execAsync(command, {
                         maxBuffer: 10 * 1024 * 1024, // 10MB buffer
                     });
+                    const execStartTime = Date.now();
+                    const { stdout, stderr } = await Promise.race([execPromise, timeoutPromise]);
+                    const execDuration = Date.now() - execStartTime;
+                    const totalCliDuration = Date.now() - cliStartTime;
+                    console.log(`   ⏱️  CLI execution: ${execDuration}ms (${(execDuration / 1000).toFixed(1)}s)`);
+                    console.log(`   ⏱️  Total CLI time: ${totalCliDuration}ms (${(totalCliDuration / 1000).toFixed(1)}s)`);
                     // Clean up temp file
                     try {
                         await fs.unlink(tempSpellPath);
@@ -677,6 +848,34 @@ class CharmsService {
                     const commitTx = typeof txArray[0] === 'string' ? txArray[0] : txArray[0]?.bitcoin || txArray[0];
                     const spellTx = typeof txArray[1] === 'string' ? txArray[1] : txArray[1]?.bitcoin || txArray[1];
                     console.log('✅ Proof generated successfully using charms CLI');
+                    // Validate proof transactions have correct package topology
+                    const network = process.env.BITCOIN_NETWORK || 'testnet4';
+                    console.log('🔍 Validating proof transaction topology...');
+                    const validation = await validateProofTransactions(commitTx, spellTx, network);
+                    if (!validation.valid) {
+                        console.error('❌ Proof validation failed:', validation.reason);
+                        if (validation.diagnostics) {
+                            console.error('📋 Validation diagnostics:', JSON.stringify(validation.diagnostics, null, 2));
+                            console.error(`   Commit TX: ${validation.diagnostics.commitTxid}`);
+                            console.error(`     Inputs: ${validation.diagnostics.commitInputs}, Outputs: ${validation.diagnostics.commitOutputs}`);
+                            console.error(`     Input UTXOs: ${validation.diagnostics.commitInputHashes?.join(', ')}`);
+                            console.error(`     Output hashes: ${validation.diagnostics.commitOutputHashes?.join(', ')}`);
+                            console.error(`   Spell TX: parsed`);
+                            console.error(`     Inputs: ${validation.diagnostics.spellInputs}, Outputs: ${validation.diagnostics.spellOutputs}`);
+                            console.error(`     Input hashes: ${validation.diagnostics.spellInputHashes?.join(', ')}`);
+                            console.error(`   Matching inputs: ${validation.diagnostics.matchingInputs}`);
+                            // Check if transactions might be swapped
+                            console.error('🔍 Checking if transactions are in correct order...');
+                            const swappedValidation = await validateProofTransactions(spellTx, commitTx, network);
+                            if (swappedValidation.valid) {
+                                console.error('⚠️ WARNING: Transactions appear to be swapped! Spell TX spends Commit TX when order is reversed.');
+                                console.error('   This suggests the CLI returned transactions in wrong order.');
+                                throw new Error(`Proof generation failed validation: Transactions appear to be in wrong order. When swapped, the topology is correct. The CLI may have returned [spell_tx, commit_tx] instead of [commit_tx, spell_tx].`);
+                            }
+                        }
+                        throw new Error(`Proof generation failed validation: ${validation.reason}. The spell transaction does not spend the commit transaction's output. This indicates an issue with the proof generation - the Prover API/CLI may have generated incorrect transactions.`);
+                    }
+                    console.log(`✅ Proof validation passed: spell transaction spends commit output (${validation.diagnostics?.matchingInputs} matching input(s))`);
                     return {
                         commit_tx: commitTx,
                         spell_tx: spellTx,
@@ -692,7 +891,9 @@ class CharmsService {
                 }
             }
             // Fall back to direct Prover API call
+            const apiStartTime = Date.now();
             console.log('📡 Using direct Prover API call (charms CLI not available or failed)');
+            console.log(`   ⏱️  Starting API proof generation (this may take 30-120 seconds)...`);
             // Log the exact payload being sent (for debugging - compare with official docs example)
             console.log('📋 EXACT PAYLOAD BEING SENT (for comparison with official docs):');
             const debugPayload = {
@@ -728,24 +929,68 @@ class CharmsService {
                 ins: payload.spell.ins,
                 outs: payload.spell.outs
             }, null, 2));
+            const apiRequestStart = Date.now();
             const response = await axios_1.default.post(this.proverUrl, payload, {
                 headers: {
                     'Content-Type': 'application/json',
                 },
+                timeout: 180000, // 180 seconds (3 minutes) timeout for proof generation
             });
+            const apiRequestDuration = Date.now() - apiRequestStart;
+            const totalApiDuration = Date.now() - apiStartTime;
+            console.log(`   ⏱️  API request: ${apiRequestDuration}ms (${(apiRequestDuration / 1000).toFixed(1)}s)`);
+            console.log(`   ⏱️  Total API time: ${totalApiDuration}ms (${(totalApiDuration / 1000).toFixed(1)}s)`);
             // API returns array: ["hex_encoded_commit_tx", "hex_encoded_spell_tx"]
             const txArray = response.data;
             if (!Array.isArray(txArray) || txArray.length !== 2) {
                 throw new Error('Invalid response format from Prover API. Expected array of 2 transaction hex strings.');
             }
             console.log('✅ Proof generated successfully via Prover API');
+            // Extract transaction hex strings (handle enum variant format if present)
+            const commitTx = typeof txArray[0] === 'string' ? txArray[0] : txArray[0]?.bitcoin || txArray[0];
+            const spellTx = typeof txArray[1] === 'string' ? txArray[1] : txArray[1]?.bitcoin || txArray[1];
+            // Validate proof transactions have correct package topology
+            const network = process.env.BITCOIN_NETWORK || 'testnet4';
+            console.log('🔍 Validating proof transaction topology...');
+            const validation = await validateProofTransactions(commitTx, spellTx, network);
+            if (!validation.valid) {
+                console.error('❌ Proof validation failed:', validation.reason);
+                if (validation.diagnostics) {
+                    console.error('📋 Validation diagnostics:', JSON.stringify(validation.diagnostics, null, 2));
+                    console.error(`   Commit TX: ${validation.diagnostics.commitTxid}`);
+                    console.error(`     Inputs: ${validation.diagnostics.commitInputs}, Outputs: ${validation.diagnostics.commitOutputs}`);
+                    console.error(`     Input UTXOs: ${validation.diagnostics.commitInputHashes?.join(', ')}`);
+                    console.error(`     Output hashes: ${validation.diagnostics.commitOutputHashes?.join(', ')}`);
+                    console.error(`   Spell TX: ${validation.diagnostics.spellInputs ? 'parsed' : 'unknown'}`);
+                    console.error(`     Inputs: ${validation.diagnostics.spellInputs}, Outputs: ${validation.diagnostics.spellOutputs}`);
+                    console.error(`     Input hashes: ${validation.diagnostics.spellInputHashes?.join(', ')}`);
+                    console.error(`   Matching inputs: ${validation.diagnostics.matchingInputs}`);
+                    // Check if transactions might be swapped
+                    console.error('🔍 Checking if transactions are in correct order...');
+                    const swappedValidation = await validateProofTransactions(spellTx, commitTx, network);
+                    if (swappedValidation.valid) {
+                        console.error('⚠️ WARNING: Transactions appear to be swapped! Spell TX spends Commit TX when order is reversed.');
+                        console.error('   This suggests the Prover API/CLI returned transactions in wrong order.');
+                        throw new Error(`Proof generation failed validation: Transactions appear to be in wrong order. When swapped, the topology is correct. The Prover API/CLI may have returned [spell_tx, commit_tx] instead of [commit_tx, spell_tx].`);
+                    }
+                }
+                throw new Error(`Proof generation failed validation: ${validation.reason}. The spell transaction does not spend the commit transaction's output. This indicates an issue with the proof generation - the Prover API/CLI may have generated incorrect transactions.`);
+            }
+            console.log(`✅ Proof validation passed: spell transaction spends commit output (${validation.diagnostics?.matchingInputs} matching input(s))`);
             // Map array response to object format for backward compatibility
             return {
-                commit_tx: txArray[0],
-                spell_tx: txArray[1],
+                commit_tx: commitTx,
+                spell_tx: spellTx,
             };
         }
         catch (error) {
+            // Handle timeout errors
+            if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+                console.error('❌ Prover API request timed out after 180 seconds');
+                console.error('   Proof generation is taking longer than expected.');
+                console.error('   This may be due to network issues or high server load.');
+                throw new Error('Proof generation timed out after 3 minutes. The Prover API may be slow or overloaded. Please try again.');
+            }
             // Enhanced error handling for 422 errors
             if (error.response) {
                 const status = error.response.status;

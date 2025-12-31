@@ -7,7 +7,7 @@ import { useCharms } from '@/hooks/use-charms';
 import { useAppKitAccount, useAppKit } from '@reown/appkit/react';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions, getWalletBalance } from '@/lib/charms/wallet';
+import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions, getWalletBalance, filterSyncedUtxos } from '@/lib/charms/wallet';
 import { getTaprootAddress } from '@/lib/charms/taproot-address';
 
 const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
@@ -18,6 +18,7 @@ import { useEffect } from 'react';
 import TransactionStatus, { TransactionStatus as TxStatus } from '@/components/ui/transaction-status';
 import { useRefreshWalletData } from '@/hooks/use-wallet-data';
 import MintSuccessModal from '@/components/ui/mint-success-modal';
+import { showEpicSuccessToast } from '@/components/ui/epic-success-toast';
 
 interface GiftCardPurchaseProps {
   name: string;
@@ -457,6 +458,34 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       const delays = [2000, 4000, 6000, 8000, 10000, 12000, 15000, 20000]; // Longer delays: 2s, 4s, 6s, 8s, 10s, 12s, 15s, 20s
       let lastUtxoError: string | null = null;
       
+      // Get node block height for filtering synced UTXOs
+      let nodeBlocks: number | undefined = undefined;
+      try {
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+        const healthResponse = await fetch(`${API_URL}/api/broadcast/health`, { cache: 'no-store' });
+        if (healthResponse.ok) {
+          const healthData = await healthResponse.json();
+          nodeBlocks = healthData?.blockchain?.blocks;
+          if (nodeBlocks) {
+            console.log(`📊 Node has synced ${nodeBlocks.toLocaleString()} blocks - will filter UTXOs accordingly`);
+          }
+        }
+      } catch (healthError) {
+        console.warn('Could not fetch node sync status, will use all UTXOs:', healthError);
+      }
+      
+      // Optional: Validate address matches expected address (for testing/debugging)
+      // Set NEXT_PUBLIC_EXPECTED_WALLET_ADDRESS in .env.local to enable this check
+      const expectedAddress = process.env.NEXT_PUBLIC_EXPECTED_WALLET_ADDRESS;
+      if (expectedAddress && address) {
+        if (address !== expectedAddress) {
+          console.warn(`⚠️ Address mismatch: Connected address (${address.substring(0, 20)}...) does not match expected address (${expectedAddress.substring(0, 20)}...)`);
+          console.warn(`   Will still proceed, but UTXOs should be from the connected address`);
+        } else {
+          console.log(`✅ Address matches expected address: ${address.substring(0, 20)}...`);
+        }
+      }
+      
       for (let attempt = 0; attempt < maxUtxoRetries; attempt++) {
         try {
           console.log(`📦 UTXO fetch attempt ${attempt + 1}/${maxUtxoRetries}...`);
@@ -464,9 +493,42 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           
           if (utxos.length > 0) {
             console.log(`✅ Found ${utxos.length} UTXOs on attempt ${attempt + 1}`);
-            inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
-            console.log(`Using UTXO: ${inUtxo}`);
-            break;
+            
+            // Filter UTXOs to prefer synced ones
+            console.log('🔍 Filtering UTXOs by sync status...');
+            const { syncedUtxos, unsyncedUtxos, unconfirmedUtxos } = await filterSyncedUtxos(utxos, address, nodeBlocks);
+            
+            console.log(`   ✅ Synced UTXOs: ${syncedUtxos.length}`);
+            console.log(`   ⏳ Unsynced UTXOs: ${unsyncedUtxos.length}`);
+            console.log(`   ⚠️ Unconfirmed UTXOs: ${unconfirmedUtxos.length}`);
+            
+            // Prefer synced UTXOs, then unconfirmed, then unsynced
+            let selectedUtxo: { txid: string; vout: number; value: number } | null = null;
+            
+            if (syncedUtxos.length > 0) {
+              // Use first synced UTXO (already sorted by block height if available)
+              selectedUtxo = syncedUtxos[0];
+              console.log(`✅ Selected synced UTXO: ${selectedUtxo.txid}:${selectedUtxo.vout} (block ${selectedUtxo.blockHeight || 'unknown'})`);
+            } else if (unconfirmedUtxos.length > 0) {
+              // Use unconfirmed UTXO (node should be able to process it)
+              selectedUtxo = unconfirmedUtxos[0];
+              console.log(`⚠️ Selected unconfirmed UTXO: ${selectedUtxo.txid}:${selectedUtxo.vout} (node should handle it)`);
+            } else if (unsyncedUtxos.length > 0) {
+              // Last resort: use unsynced UTXO (may fail, but worth trying)
+              const utxo = unsyncedUtxos[0];
+              selectedUtxo = utxo;
+              console.warn(`⚠️ Selected unsynced UTXO: ${utxo.txid}:${utxo.vout} (block ${utxo.blockHeight}, needs ${utxo.blocksNeeded} more blocks)`);
+              console.warn(`   This may fail if the node hasn't synced enough blocks yet`);
+            }
+            
+            if (selectedUtxo) {
+              inUtxo = `${selectedUtxo.txid}:${selectedUtxo.vout}`;
+              console.log(`✅ Using UTXO: ${inUtxo}`);
+              break;
+            } else {
+              console.warn(`⚠️ No usable UTXOs found after filtering`);
+              lastUtxoError = 'No usable UTXOs found after filtering by sync status';
+            }
           } else {
             console.warn(`⚠️ No UTXOs found on attempt ${attempt + 1}, but balance exists (${validatedBalance} BTC)`);
             lastUtxoError = 'No UTXOs found in response';
@@ -501,8 +563,14 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         try {
           utxos = await getWalletUtxos(address, null);
           if (utxos.length > 0) {
-            inUtxo = `${utxos[0].txid}:${utxos[0].vout}`;
-            console.log(`✅ Got UTXO on final attempt: ${inUtxo}`);
+            // Filter on final attempt too
+            const { syncedUtxos, unsyncedUtxos, unconfirmedUtxos } = await filterSyncedUtxos(utxos, address, nodeBlocks);
+            
+            let selectedUtxo = syncedUtxos[0] || unconfirmedUtxos[0] || unsyncedUtxos[0];
+            if (selectedUtxo) {
+              inUtxo = `${selectedUtxo.txid}:${selectedUtxo.vout}`;
+              console.log(`✅ Got UTXO on final attempt: ${inUtxo}`);
+            }
           }
         } catch (finalError: any) {
           console.warn('Final UTXO fetch attempt failed:', finalError);
@@ -520,12 +588,34 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         
         setTxStatus('error');
         setUtxoErrorStartTime(Date.now());
-        let errorMsg = `Unable to fetch UTXOs from wallet after ${elapsedTimeStr}.\n\n`;
-        errorMsg += `Your wallet shows a balance of ${formatSats(Math.floor(validatedBalance * 100_000_000))}, but UTXO information is not yet available.\n\n`;
-        errorMsg += `This usually happens when:\n`;
-        errorMsg += `1. You just added bitcoin and the network hasn't synced yet\n`;
-        errorMsg += `2. Your wallet is still syncing with the blockchain\n`;
-        errorMsg += `3. Recent transactions haven't been confirmed\n`;
+        let errorMsg = `Unable to fetch usable UTXOs from wallet after ${elapsedTimeStr}.\n\n`;
+        errorMsg += `Your wallet shows a balance of ${formatSats(Math.floor(validatedBalance * 100_000_000))}, but no usable UTXOs were found.\n\n`;
+        
+        if (nodeBlocks !== undefined) {
+          errorMsg += `Node sync status: ${nodeBlocks.toLocaleString()} blocks synced\n\n`;
+          errorMsg += `This may mean:\n`;
+          errorMsg += `1. Your UTXOs are in blocks the node hasn't synced yet\n`;
+          errorMsg += `2. All UTXOs are unconfirmed and not yet available\n`;
+          if (expectedAddress && address && address !== expectedAddress) {
+            errorMsg += `3. Address mismatch: Connected (${address.substring(0, 20)}...) vs Expected (${expectedAddress.substring(0, 20)}...)\n`;
+          } else {
+            errorMsg += `3. Your wallet address may not match the expected address\n`;
+          }
+          errorMsg += `\nSolutions:\n`;
+          errorMsg += `• Wait for the node to sync more blocks (check: ./monitor-bitcoin-health.sh)\n`;
+          if (expectedAddress && address && address !== expectedAddress) {
+            errorMsg += `• Ensure you're using the correct wallet address: ${expectedAddress}\n`;
+          } else {
+            errorMsg += `• Ensure you're using the correct wallet address\n`;
+          }
+          errorMsg += `• Wait for recent transactions to confirm\n`;
+          errorMsg += `• Check your UTXOs: ./check-utxos.sh ${address || expectedAddress || 'YOUR_ADDRESS'}\n`;
+        } else {
+          errorMsg += `This usually happens when:\n`;
+          errorMsg += `1. You just added bitcoin and the network hasn't synced yet\n`;
+          errorMsg += `2. Your wallet is still syncing with the blockchain\n`;
+          errorMsg += `3. Recent transactions haven't been confirmed\n`;
+        }
         if (elapsedSeconds < 120) {
           errorMsg += `\n⏰ Your transaction is very recent (${elapsedTimeStr} ago). Please wait a bit longer for network sync.\n`;
         }
@@ -632,9 +722,32 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           setSpellTxid(spellTxid);
           setTxStatus('confirming');
           
-          toast.success(`✅ Gift card minted successfully!`);
-          toast.success(`Commit TX: ${commitTxid.substring(0, 16)}...`);
-          toast.success(`Spell TX: ${spellTxid.substring(0, 16)}...`);
+          // Show epic success toast with all details
+          showEpicSuccessToast({
+            brand: name,
+            image: imageUrl,
+            amount: currentAmount,
+            commitTxid,
+            spellTxid,
+            onViewWallet: () => {
+              // Store new card info for wallet page
+              if (commitTxid && spellTxid) {
+                const newCardData = {
+                  brand: name,
+                  image: imageUrl,
+                  amount: currentAmount,
+                  commitTxid,
+                  spellTxid,
+                  timestamp: Date.now(),
+                };
+                // Store in sessionStorage for wallet page to pick up
+                if (typeof window !== 'undefined') {
+                  sessionStorage.setItem('newMintedCard', JSON.stringify(newCardData));
+                }
+              }
+              router.push('/wallet');
+            },
+          });
           
           // Open explorer links
           const explorerBase = 'https://memepool.space/testnet4/tx/';

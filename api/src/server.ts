@@ -47,14 +47,8 @@ app.listen(PORT, () => {
   console.log(`🚀 Charms Gift Cards API server running on port ${PORT}`);
   console.log(`📦 App path: ${process.env.CHARMS_APP_PATH || '../gift-cards'}`);
   console.log(`🔑 App VK: ${process.env.CHARMS_APP_VK?.substring(0, 16)}...`);
-  // Debug: Check if CryptoAPIs API key is loaded
-  if (process.env.CRYPTOAPIS_API_KEY) {
-    console.log(`✅ CryptoAPIs API key loaded (length: ${process.env.CRYPTOAPIS_API_KEY.trim().length} chars)`);
-  } else {
-    console.warn(`⚠️ CryptoAPIs API key not found. Check api/.env file for CRYPTOAPIS_API_KEY`);
-  }
   
-  // Debug: Check if Bitcoin Core RPC is configured
+  // Check if Bitcoin Core RPC is configured
   const bitcoinRpcConfig = getBitcoinRpcConfig();
   if (bitcoinRpcConfig) {
     const rpcUrl = process.env.BITCOIN_RPC_URL;
@@ -63,14 +57,36 @@ app.listen(PORT, () => {
     console.log(`✅ Bitcoin Core RPC configured: ${safeUrl}`);
     console.log(`   Package broadcasting will use submitpackage RPC method`);
     
-    // Test RPC connection on startup
+    // Test RPC connection on startup (with timeout to not block server startup)
     console.log(`🔍 Testing Bitcoin Core RPC connection...`);
-    testBitcoinRpcConnection(bitcoinRpcConfig)
-      .then((result) => {
+    Promise.race([
+      testBitcoinRpcConnection(bitcoinRpcConfig),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Connection test timeout after 15 seconds')), 15000)
+      )
+    ])
+      .then((result: any) => {
         if (result.connected) {
-          console.log(`✅ Bitcoin Core RPC connection successful`);
-          if (result.details) {
-            console.log(`   Chain: ${result.details.chain || 'unknown'}, Blocks: ${result.details.blocks?.toLocaleString() || 'unknown'}`);
+          if (result.loading) {
+            console.log(`⏳ Bitcoin Core RPC connected (node is initializing)`);
+            console.log(`   ${result.error || 'Node is initializing and will be ready soon'}`);
+            console.log(`   Package broadcasting will be available once initialization completes.`);
+          } else {
+            console.log(`✅ Bitcoin Core RPC connection successful`);
+            if (result.details) {
+              const blocks = result.details.blocks || 0;
+              const headers = result.details.headers || 0;
+              const progress = result.details.verificationprogress || 0;
+              const progressPercent = (progress * 100).toFixed(2);
+              const chain = result.details.chain || 'unknown';
+              
+              if (headers > 0) {
+                console.log(`   Chain: ${chain}, Blocks: ${blocks.toLocaleString()} / ${headers.toLocaleString()} (${progressPercent}%)`);
+              } else {
+                console.log(`   Chain: ${chain}, Blocks: ${blocks.toLocaleString()} (${progressPercent}%)`);
+              }
+            }
+            console.log(`   Package broadcasting is ready!`);
           }
         } else {
           console.warn(`⚠️ Bitcoin Core RPC connection failed: ${result.error}`);
@@ -79,12 +95,20 @@ app.listen(PORT, () => {
         }
       })
       .catch((error) => {
-        console.warn(`⚠️ Error testing Bitcoin Core RPC connection: ${error.message}`);
-        console.warn(`   The node may still be starting up. Package broadcasting will fail until the node is available.`);
+        // Timeout or other error - don't fail server startup, just warn
+        if (error.message?.includes('timeout')) {
+          console.log(`⏳ Bitcoin Core RPC connection test timed out (node may be busy syncing)`);
+          console.log(`   This is normal during heavy sync operations. The node is likely reachable.`);
+          console.log(`   Package broadcasting will be attempted when needed.`);
+          console.log(`   Check status: curl http://localhost:${PORT}/api/broadcast/health`);
+        } else {
+          console.warn(`⚠️ Error testing Bitcoin Core RPC connection: ${error.message}`);
+          console.warn(`   The node may still be starting up. Package broadcasting will fail until the node is available.`);
+        }
       });
   } else {
     console.log(`ℹ️ Bitcoin Core RPC not configured (BITCOIN_RPC_URL not set)`);
-    console.log(`   Package broadcasting will use sequential method (CryptoAPIs → Mempool.space)`);
+    console.log(`   Package broadcasting requires Bitcoin Core RPC. Set BITCOIN_RPC_URL in api/.env to enable broadcasting.`);
   }
 });
 

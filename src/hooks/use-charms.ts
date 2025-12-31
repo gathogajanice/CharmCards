@@ -55,7 +55,7 @@ export function useCharms(): UseCharmsReturn {
             ...params,
             expirationDate: params.expirationDate || Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60,
           }),
-          signal: AbortSignal.timeout(60000), // 60 second timeout for minting
+          signal: AbortSignal.timeout(180000), // 180 second (3 minute) timeout for minting - allows time for proof generation
         });
       } catch (fetchError: any) {
         // Catch network errors explicitly
@@ -70,7 +70,7 @@ export function useCharms(): UseCharmsReturn {
         });
         
         if (errorName === 'AbortError' || errorName === 'TimeoutError') {
-          throw new Error('Request timed out. The API server may be slow or unresponsive. Please try again.');
+          throw new Error('Request timed out after 3 minutes. Proof generation may be taking longer than expected. Please try again or check if the Prover API is experiencing high load.');
         }
         if (errorMsg.includes('Failed to fetch') || errorMsg.includes('NetworkError') || errorMsg.includes('fetch') || errorMsg.includes('Network request failed')) {
           throw new Error(`Cannot connect to API server at ${API_URL}. Please ensure the API server is running on port 3001. Start it with: cd api && npm run dev`);
@@ -132,7 +132,7 @@ export function useCharms(): UseCharmsReturn {
       
       // Handle specific error types
       if (errorName === 'AbortError' || errorName === 'TimeoutError') {
-        errorMessage = 'Request timed out. The API server may be slow or unresponsive. Please try again.';
+        errorMessage = 'Request timed out after 3 minutes. Proof generation may be taking longer than expected. Please try again or check if the Prover API is experiencing high load.';
       } else if (errorMsg.includes('Failed to fetch') || errorMsg.includes('NetworkError') || errorMsg.includes('fetch') || errorMsg.includes('Network request failed')) {
         errorMessage = `Cannot connect to API server at ${API_URL}. Please ensure the API server is running on port 3001. Start it with: cd api && npm run dev`;
       } else if (errorMsg.includes('API server')) {

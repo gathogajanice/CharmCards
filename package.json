@@ -6,7 +6,13 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "monitor:bitcoin": "./start-bitcoin-monitor.sh",
+    "monitor:bitcoin:health": "./monitor-bitcoin-core.sh",
+    "monitor:bitcoin:sync": "./monitor-bitcoin-sync.sh",
+    "monitor:bitcoin:api": "./monitor-bitcoin-health.sh",
+    "bitcoin:status": "./check-bitcoin-rpc.sh",
+    "bitcoin:sync": "./check-bitcoin-sync.sh"
   },
   "dependencies": {
     "@coinbase/wallet-sdk": "^4.3.7",
