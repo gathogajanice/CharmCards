@@ -18,8 +18,8 @@ echo ""
 
 # Get node sync status
 echo "📊 Node Sync Status:"
-NODE_BLOCKS=$(~/.local/bin/bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('blocks', 0))" 2>/dev/null || echo "0")
-NODE_HEADERS=$(~/.local/bin/bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('headers', 0))" 2>/dev/null || echo "0")
+NODE_BLOCKS=$(~/.local/bin/bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('blocks', 0))" 2>/dev/null || echo "0")
+NODE_HEADERS=$(~/.local/bin/bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(d.get('headers', 0))" 2>/dev/null || echo "0")
 echo "   Blocks: ${NODE_BLOCKS:,} / ${NODE_HEADERS:,}"
 echo ""
 

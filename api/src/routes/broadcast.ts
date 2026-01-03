@@ -253,6 +253,14 @@ export async function isBitcoinCoreReady(config?: BitcoinRpcConfig): Promise<{
     };
   }
 
+  // Test mode: bypass readiness checks for immediate testing
+  if (process.env.BITCOIN_TEST_MODE === 'true') {
+    return {
+      ready: true,
+      reason: 'Test mode enabled - bypassing readiness checks',
+    };
+  }
+
   try {
     const health = await getBitcoinNodeHealth(rpcConfig);
     
@@ -1158,12 +1166,12 @@ router.post('/tx', async (req: Request, res: Response) => {
           'Node may not have synced enough blocks yet',
           'The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded',
           'Wait for node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)',
-          'Check sync status: bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
+          'Check sync status: bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
         ];
       } else if (rpcError.message?.includes('timeout')) {
         troubleshooting = [
           'Node may be overloaded or slow to respond',
-          'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+          'Check node logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
         ];
       }
       
@@ -1300,7 +1308,8 @@ router.post('/package', async (req: Request, res: Response) => {
     // Check if Bitcoin Core is ready for broadcasting
     const readiness = await isBitcoinCoreReady(bitcoinRpcConfig);
     
-    if (!readiness.ready) {
+    // In test mode, log warning but allow broadcasting attempt
+    if (!readiness.ready && process.env.BITCOIN_TEST_MODE !== 'true') {
       // Determine error type based on reason
       let errorType = 'node_not_ready';
       let errorCode = 'NODE_NOT_READY';
@@ -1328,6 +1337,11 @@ router.post('/package', async (req: Request, res: Response) => {
         suggestion: 'Wait for Bitcoin Core to finish syncing or check node status',
         healthCheck: 'Check /api/broadcast/ready or /api/broadcast/health for current status',
       });
+    }
+    
+    // In test mode, log that we're bypassing the check
+    if (process.env.BITCOIN_TEST_MODE === 'true' && !readiness.ready) {
+      console.warn('⚠️ Test mode enabled - bypassing readiness check. Node status:', readiness.reason);
     }
     
     // Broadcast package via Bitcoin Core RPC
@@ -1371,7 +1385,7 @@ router.post('/package', async (req: Request, res: Response) => {
         errorCode = 'RPC_TIMEOUT';
         troubleshooting = [
           'Node may be overloaded or still syncing',
-          'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+          'Check node logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
         ];
       } else if (rpcError.isSyncIssue ||
                  rpcError.errorType === 'sync_required' ||
@@ -1393,7 +1407,7 @@ router.post('/package', async (req: Request, res: Response) => {
           'Node may not have synced enough blocks yet',
           'The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded',
           'Wait for node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)',
-          'Check sync status: bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
+          'Check sync status: bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
         ];
       } else if (rpcError.message?.includes('package topology') || 
                  rpcError.message?.includes('topology disallowed') ||
@@ -1533,7 +1547,7 @@ router.get('/health', async (req: Request, res: Response) => {
           'Verify Bitcoin Core is running: ps aux | grep bitcoind',
           'Check RPC connection: ./check-bitcoin-rpc.sh',
           'Verify BITCOIN_RPC_URL in .env matches your Bitcoin Core configuration',
-          'Check Bitcoin Core logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+          'Check Bitcoin Core logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
         ],
       };
 

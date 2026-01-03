@@ -6,7 +6,7 @@ echo "=========================="
 echo ""
 
 # Try to get blockchain info
-INFO=$(~/.local/bin/bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo 2>/dev/null)
+INFO=$(~/.local/bin/bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo 2>/dev/null)
 
 if [ $? -ne 0 ]; then
     echo "❌ Cannot connect to Bitcoin Core node"

@@ -43,7 +43,7 @@ else
     echo -e "${RED}❌ Bitcoin Core (bitcoind) process is NOT running${NC}"
     echo ""
     echo -e "${YELLOW}💡 Fix: Start Bitcoin Core with:${NC}"
-    echo "   bitcoind -testnet -datadir=$DATA_DIR -daemon"
+    echo "   bitcoind -chain=testnet4 -datadir=$DATA_DIR -daemon"
     echo "   Or run: ./setup-bitcoin-node.sh"
     echo ""
     exit 1
@@ -127,7 +127,7 @@ echo ""
 echo -e "${BLUE}Step 4: Testing RPC connection via bitcoin-cli...${NC}"
 
 # Try to connect via bitcoin-cli
-RPC_TEST_CMD="$BITCOIN_CLI -testnet -datadir=$DATA_DIR getblockchaininfo 2>&1"
+RPC_TEST_CMD="$BITCOIN_CLI -chain=testnet4 -datadir=$DATA_DIR getblockchaininfo 2>&1"
 RPC_OUTPUT=$(eval "$RPC_TEST_CMD" 2>&1)
 RPC_EXIT_CODE=$?
 
@@ -210,7 +210,7 @@ else
     echo -e "${YELLOW}💡 Troubleshooting steps:${NC}"
     echo "   1. Check node logs: tail -f $DATA_DIR/debug.log"
     echo "   2. Verify RPC config: cat $CONFIG_FILE | grep rpc"
-    echo "   3. Restart node if needed: pkill bitcoind && bitcoind -testnet -datadir=$DATA_DIR -daemon"
+    echo "   3. Restart node if needed: pkill bitcoind && bitcoind -chain=testnet4 -datadir=$DATA_DIR -daemon"
     echo ""
     exit 1
 fi
