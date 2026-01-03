@@ -47,6 +47,11 @@ const NETWORK = process.env.BITCOIN_NETWORK || 'testnet4';
 const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
     ? 'https://memepool.space/testnet4'
     : 'https://memepool.space';
+// Broadcast mode configuration
+// 'charms' = Trust Prover API (default - Prover API broadcasts internally)
+// 'local' = Use Bitcoin Core for local broadcasting
+// 'auto' = Try Prover API first, fallback to local
+const BROADCAST_MODE = (process.env.BROADCAST_MODE || 'charms').toLowerCase();
 const getBitcoinRpcConfig = () => {
     const rpcUrl = process.env.BITCOIN_RPC_URL?.trim();
     if (!rpcUrl) {
@@ -171,6 +176,8 @@ async function getBitcoinNodeHealth(config) {
                 headers: blockchainInfo.result?.headers || 0,
                 verificationProgress: blockchainInfo.result?.verificationprogress || 0,
                 initialBlockDownload: blockchainInfo.result?.initialblockdownload || false,
+                pruned: blockchainInfo.result?.pruned || false,
+                pruneHeight: blockchainInfo.result?.pruneheight || 0,
             },
             network: {
                 connections: networkInfo.result?.connections || 0,
@@ -220,6 +227,13 @@ async function isBitcoinCoreReady(config) {
         return {
             ready: false,
             reason: 'Bitcoin Core RPC not configured',
+        };
+    }
+    // Test mode: bypass readiness checks for immediate testing
+    if (process.env.BITCOIN_TEST_MODE === 'true') {
+        return {
+            ready: true,
+            reason: 'Test mode enabled - bypassing readiness checks',
         };
     }
     try {
@@ -573,14 +587,58 @@ async function submitTransactionsSequentially(commitTxHex, spellTxHex, config) {
             error.message?.includes('inputs-missingorspent') ||
             error.message?.includes('missingorspent');
         if (isUtxoNotFound) {
-            const enhancedError = new Error(`Sequential submission failed: Bitcoin Core doesn't have the UTXO data needed. ` +
-                `The commit transaction spends a UTXO that Bitcoin Core hasn't synced yet. ` +
-                `This is a sync issue - Bitcoin Core needs to download more blocks to have the UTXO data. ` +
-                `Current sync: ~60% complete. Please wait for Bitcoin Core to sync more blocks.`);
+            // Get actual sync status and prune info for accurate error message
+            let syncInfo = '';
+            let isPrunedNode = false;
+            let pruneHeight = 0;
+            try {
+                const blockchainInfo = await callBitcoinRpc('getblockchaininfo', [], config);
+                const blocks = blockchainInfo.result?.blocks || 0;
+                const headers = blockchainInfo.result?.headers || 0;
+                const progress = blockchainInfo.result?.verificationprogress || 0;
+                const progressPercent = (progress * 100).toFixed(1);
+                const ibd = blockchainInfo.result?.initialblockdownload || false;
+                isPrunedNode = blockchainInfo.result?.pruned || false;
+                pruneHeight = blockchainInfo.result?.pruneheight || 0;
+                if (ibd && headers > 0) {
+                    const blockPercent = ((blocks / headers) * 100).toFixed(1);
+                    syncInfo = `Current sync: ${blockPercent}% (${blocks.toLocaleString()}/${headers.toLocaleString()} blocks, verification: ${progressPercent}%)`;
+                }
+                else if (progress > 0) {
+                    syncInfo = `Current sync: ${progressPercent}% complete (${blocks.toLocaleString()} blocks)`;
+                }
+                else {
+                    syncInfo = `Current sync: ${blocks.toLocaleString()} blocks synced`;
+                }
+                if (isPrunedNode && pruneHeight > 0) {
+                    syncInfo += `. Node is PRUNED (prune height: ${pruneHeight.toLocaleString()}) - only blocks after ${pruneHeight.toLocaleString()} are available`;
+                }
+            }
+            catch (syncError) {
+                // If we can't get sync status, use generic message
+                syncInfo = 'Unable to determine sync status';
+            }
+            // Determine if this is a prune issue or sync issue
+            const errorMessage = isPrunedNode && pruneHeight > 0
+                ? `Sequential submission failed: Bitcoin Core cannot verify the UTXO because it's from a pruned block. ` +
+                    `The node is pruned (prune height: ${pruneHeight.toLocaleString()}) and only has blocks after ${pruneHeight.toLocaleString()}. ` +
+                    `The UTXO you're trying to spend is from a block that was pruned. ` +
+                    `Solution: Use a UTXO from a recent block (after ${pruneHeight.toLocaleString()}) or disable pruning. ` +
+                    `${syncInfo}`
+                : `Sequential submission failed: Bitcoin Core doesn't have the UTXO data needed. ` +
+                    `The commit transaction spends a UTXO that Bitcoin Core hasn't synced yet. ` +
+                    `This is a sync issue - Bitcoin Core needs to download more blocks to have the UTXO data. ` +
+                    `${syncInfo}. Please wait for Bitcoin Core to sync more blocks.`;
+            const enhancedError = new Error(errorMessage);
             enhancedError.originalError = error.message;
-            enhancedError.errorType = 'utxo_not_synced';
-            enhancedError.errorCode = 'UTXO_NOT_SYNCED';
-            enhancedError.isSyncIssue = true;
+            enhancedError.errorType = isPrunedNode ? 'utxo_pruned' : 'utxo_not_synced';
+            enhancedError.errorCode = isPrunedNode ? 'UTXO_PRUNED' : 'UTXO_NOT_SYNCED';
+            // Only set isSyncIssue for actual sync issues (when node is NOT pruned)
+            // Pruned issues should NOT be marked as sync issues
+            enhancedError.isSyncIssue = !isPrunedNode;
+            enhancedError.isPrunedIssue = isPrunedNode;
+            enhancedError.pruneHeight = pruneHeight;
+            console.log(`🔍 Error type detected: ${enhancedError.errorType} (isPrunedIssue: ${isPrunedNode}, isSyncIssue: ${!isPrunedNode})`);
             throw enhancedError;
         }
         throw error;
@@ -706,12 +764,39 @@ async function broadcastPackageViaBitcoinRpc(commitTxHex, spellTxHex, config) {
                 return await submitTransactionsSequentially(commitTxHex, spellTxHex, config);
             }
             catch (fallbackError) {
-                // Check if fallback failed due to sync issue
+                // Check for pruned issues FIRST (before sync issues)
+                // Pruned errors should be propagated as-is, not treated as sync errors
+                const isPrunedIssue = fallbackError.isPrunedIssue ||
+                    fallbackError.errorType === 'utxo_pruned' ||
+                    fallbackError.errorCode === 'UTXO_PRUNED';
+                if (isPrunedIssue) {
+                    // This is a pruned issue - propagate the pruned error
+                    const enhancedError = new Error(`Package topology error and sequential fallback failed due to pruned UTXO. ` +
+                        `${fallbackError.message || 'Bitcoin Core cannot verify the UTXO because it\'s from a pruned block.'} ` +
+                        `Original error: ${error.message}. ` +
+                        `Fallback error: ${fallbackError.message}`);
+                    enhancedError.originalError = error.message;
+                    enhancedError.fallbackError = fallbackError.message;
+                    enhancedError.errorType = 'utxo_pruned';
+                    enhancedError.errorCode = 'UTXO_PRUNED';
+                    enhancedError.isPrunedIssue = true;
+                    enhancedError.isSyncIssue = false;
+                    enhancedError.pruneHeight = fallbackError.pruneHeight || 0;
+                    enhancedError.diagnostics = {
+                        topologyCheck: topologyCheck.diagnostics,
+                        commitStructure,
+                        spellStructure,
+                        recommendation: 'Use a UTXO from a recent block (after the prune height) or disable pruning.',
+                    };
+                    console.log(`🔍 Fallback error detected as PRUNED issue: ${enhancedError.errorType}, prune height: ${enhancedError.pruneHeight}`);
+                    throw enhancedError;
+                }
+                // Check if fallback failed due to sync issue (only if NOT pruned)
                 const isSyncIssue = fallbackError.isSyncIssue ||
                     fallbackError.errorType === 'utxo_not_synced' ||
                     fallbackError.errorType === 'sync_required' ||
-                    fallbackError.message?.includes("doesn't have the UTXO data") ||
-                    fallbackError.message?.includes('bad-txns-inputs-missingorspent');
+                    (fallbackError.message?.includes("doesn't have the UTXO data") && !isPrunedIssue) ||
+                    (fallbackError.message?.includes('bad-txns-inputs-missingorspent') && !isPrunedIssue);
                 if (isSyncIssue) {
                     // This is a sync issue - provide clear guidance
                     const enhancedError = new Error(`Package topology error and sequential fallback failed due to sync issue. ` +
@@ -723,12 +808,14 @@ async function broadcastPackageViaBitcoinRpc(commitTxHex, spellTxHex, config) {
                     enhancedError.errorType = 'sync_required';
                     enhancedError.errorCode = 'SYNC_REQUIRED';
                     enhancedError.isSyncIssue = true;
+                    enhancedError.isPrunedIssue = false;
                     enhancedError.diagnostics = {
                         topologyCheck: topologyCheck.diagnostics,
                         commitStructure,
                         spellStructure,
                         recommendation: 'Wait for Bitcoin Core to finish syncing. The node needs to download blocks containing the UTXO you\'re trying to spend.',
                     };
+                    console.log(`🔍 Fallback error detected as SYNC issue: ${enhancedError.errorType}`);
                     throw enhancedError;
                 }
                 // If fallback also fails for other reasons, throw with enhanced error information
@@ -850,8 +937,23 @@ async function validateTransaction(txHex) {
  *
  * Request body: transaction hex (plain text)
  * Response: transaction ID (plain text)
+ *
+ * NOTE: If BROADCAST_MODE=charms (default), this endpoint is disabled because
+ * Charms Prover API handles broadcasting internally as part of /spells/prove
  */
 router.post('/tx', async (req, res) => {
+    // Check broadcast mode - if 'charms', Prover API already handles broadcasting
+    if (BROADCAST_MODE === 'charms') {
+        console.log('ℹ️  BROADCAST_MODE=charms: Charms Prover API handles broadcasting internally');
+        console.log('   Charms Prover API broadcasts transactions internally as part of /spells/prove');
+        console.log('   No local broadcast needed - transactions are already in mempool');
+        return res.status(400).json({
+            error: 'Local broadcasting disabled',
+            message: 'Charms Prover API handles package submission internally. No separate broadcast step is required.',
+            broadcastMode: 'charms',
+            explanation: 'Charms requires commit and spell transactions to be broadcast as a package. When using the Charms Prover API, this package submission is performed internally as part of the /spells/prove call using Charms\' full nodes. No separate broadcast step is required or expected from the client.',
+        });
+    }
     // Declare txHex outside try block so it's accessible in catch block
     let txHex;
     try {
@@ -979,13 +1081,13 @@ router.post('/tx', async (req, res) => {
                     'Node may not have synced enough blocks yet',
                     'The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded',
                     'Wait for node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)',
-                    'Check sync status: bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
+                    'Check sync status: bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
                 ];
             }
             else if (rpcError.message?.includes('timeout')) {
                 troubleshooting = [
                     'Node may be overloaded or slow to respond',
-                    'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+                    'Check node logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
                 ];
             }
             return res.status(500).json({
@@ -1031,9 +1133,24 @@ router.post('/tx', async (req, res) => {
  * POST /api/broadcast/package
  * Broadcast a transaction package (commit + spell) via Bitcoin Core RPC
  * Per Charms docs: "Broadcast both transactions together as a package"
+ *
+ * NOTE: If BROADCAST_MODE=charms (default), this endpoint returns early because
+ * Charms Prover API already broadcasts transactions internally as part of /spells/prove
  */
 router.post('/package', async (req, res) => {
     try {
+        // Check broadcast mode - if 'charms', Prover API already broadcast
+        if (BROADCAST_MODE === 'charms') {
+            console.log('ℹ️  BROADCAST_MODE=charms: Charms Prover API handles broadcasting internally');
+            console.log('   Charms Prover API broadcasts transactions internally as part of /spells/prove');
+            console.log('   No local broadcast needed - transactions are already in mempool');
+            return res.status(400).json({
+                error: 'Local broadcasting disabled',
+                message: 'Charms Prover API handles package submission internally. No separate broadcast step is required.',
+                broadcastMode: 'charms',
+                explanation: 'Charms requires commit and spell transactions to be broadcast as a package. When using the Charms Prover API, this package submission is performed internally as part of the /spells/prove call using Charms\' full nodes. No separate broadcast step is required or expected from the client.',
+            });
+        }
         const { commitTx, spellTx } = req.body;
         if (!commitTx || typeof commitTx !== 'string') {
             return res.status(400).json({ error: 'commitTx (commit transaction hex) is required' });
@@ -1111,7 +1228,8 @@ router.post('/package', async (req, res) => {
         }
         // Check if Bitcoin Core is ready for broadcasting
         const readiness = await isBitcoinCoreReady(bitcoinRpcConfig);
-        if (!readiness.ready) {
+        // In test mode, log warning but allow broadcasting attempt
+        if (!readiness.ready && process.env.BITCOIN_TEST_MODE !== 'true') {
             // Determine error type based on reason
             let errorType = 'node_not_ready';
             let errorCode = 'NODE_NOT_READY';
@@ -1140,6 +1258,10 @@ router.post('/package', async (req, res) => {
                 suggestion: 'Wait for Bitcoin Core to finish syncing or check node status',
                 healthCheck: 'Check /api/broadcast/ready or /api/broadcast/health for current status',
             });
+        }
+        // In test mode, log that we're bypassing the check
+        if (process.env.BITCOIN_TEST_MODE === 'true' && !readiness.ready) {
+            console.warn('⚠️ Test mode enabled - bypassing readiness check. Node status:', readiness.reason);
         }
         // Broadcast package via Bitcoin Core RPC
         try {
@@ -1180,21 +1302,75 @@ router.post('/package', async (req, res) => {
                 errorCode = 'RPC_TIMEOUT';
                 troubleshooting = [
                     'Node may be overloaded or still syncing',
-                    'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+                    'Check node logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
+                ];
+            }
+            else if (rpcError.isPrunedIssue || rpcError.errorType === 'utxo_pruned' || rpcError.errorCode === 'UTXO_PRUNED') {
+                // Specific error for pruned block issues - check this BEFORE sync issues
+                errorType = 'utxo_pruned';
+                errorCode = 'UTXO_PRUNED';
+                const pruneHeight = rpcError.pruneHeight || 0;
+                const nodeBlocks = rpcError.nodeBlocks || 0;
+                console.log(`🔍 Package endpoint: Detected PRUNED issue (errorType: ${rpcError.errorType}, errorCode: ${rpcError.errorCode}, pruneHeight: ${pruneHeight})`);
+                troubleshooting = [
+                    'Bitcoin Core node is PRUNED and cannot verify UTXOs from pruned blocks',
+                    `Prune height: ${pruneHeight.toLocaleString()} (node only has blocks after this)`,
+                    `Current node blocks: ${nodeBlocks.toLocaleString()} (100% synced)`,
+                    `The UTXO you're trying to spend is from a block before ${pruneHeight.toLocaleString()}`,
+                    'Pruned nodes only keep the last ~550MB of blocks and delete older block data',
+                    '',
+                    'SOLUTION: Get a fresh UTXO from the faucet',
+                    `  • New coins will be from recent blocks (after ${pruneHeight.toLocaleString()})`,
+                    '  • These will work with your pruned node',
+                    '  • Use the Testnet4 faucet to get fresh testnet coins',
+                    '',
+                    'Alternative: Disable pruning in bitcoin.conf (requires full re-sync from scratch)',
                 ];
             }
             else if (rpcError.isSyncIssue ||
                 rpcError.errorType === 'sync_required' ||
                 rpcError.errorType === 'utxo_not_synced' ||
-                (rpcError.message?.includes('bad-txns-inputs-missingorspent') && rpcError.fallbackError?.includes('bad-txns-inputs-missingorspent'))) {
+                (rpcError.message?.includes('bad-txns-inputs-missingorspent') &&
+                    rpcError.fallbackError?.includes('bad-txns-inputs-missingorspent'))) {
+                // Only treat as sync issue if it's NOT a pruned issue (pruned check already happened above)
                 errorType = 'sync_required';
                 errorCode = 'SYNC_REQUIRED';
+                console.log(`🔍 Package endpoint: Detected SYNC issue (isSyncIssue: ${rpcError.isSyncIssue}, errorType: ${rpcError.errorType})`);
+                // Get actual sync status for accurate troubleshooting message
+                let syncStatusMsg = 'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health';
+                try {
+                    const blockchainInfo = await callBitcoinRpc('getblockchaininfo', [], bitcoinRpcConfig);
+                    const blocks = blockchainInfo.result?.blocks || 0;
+                    const headers = blockchainInfo.result?.headers || 0;
+                    const progress = blockchainInfo.result?.verificationprogress || 0;
+                    const progressPercent = (progress * 100).toFixed(1);
+                    const ibd = blockchainInfo.result?.initialblockdownload || false;
+                    const isPruned = blockchainInfo.result?.pruned || false;
+                    const pruneHeight = blockchainInfo.result?.pruneheight || 0;
+                    if (ibd && headers > 0) {
+                        const blockPercent = ((blocks / headers) * 100).toFixed(1);
+                        syncStatusMsg = `The node is currently ${blockPercent}% synced (${blocks.toLocaleString()}/${headers.toLocaleString()} blocks, verification: ${progressPercent}%) - it needs to sync blocks containing your UTXO`;
+                    }
+                    else if (progress > 0) {
+                        syncStatusMsg = `The node is currently ${progressPercent}% synced (${blocks.toLocaleString()} blocks) - it needs to sync blocks containing your UTXO`;
+                    }
+                    else {
+                        syncStatusMsg = `The node has synced ${blocks.toLocaleString()} blocks - it needs to sync blocks containing your UTXO`;
+                    }
+                    if (isPruned && pruneHeight > 0) {
+                        syncStatusMsg += `. Note: Node is pruned (prune height: ${pruneHeight.toLocaleString()}) - only blocks after ${pruneHeight.toLocaleString()} are available`;
+                    }
+                }
+                catch (syncError) {
+                    // If we can't get sync status, use generic message
+                    syncStatusMsg = 'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health';
+                }
                 troubleshooting = [
                     'Bitcoin Core hasn\'t synced enough blocks to have the UTXO data needed',
                     'The commit transaction spends a UTXO that Bitcoin Core hasn\'t downloaded yet',
                     'This is a sync issue - you need to wait for Bitcoin Core to sync more blocks',
                     'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health',
-                    'The node is currently ~60% synced - it needs to sync blocks containing your UTXO',
+                    syncStatusMsg,
                 ];
             }
             else if (rpcError.message?.includes('bad-txns-inputs-missingorspent') || rpcError.message?.includes('inputs-missingorspent')) {
@@ -1204,7 +1380,7 @@ router.post('/package', async (req, res) => {
                     'Node may not have synced enough blocks yet',
                     'The UTXO you\'re trying to spend is in a block the node hasn\'t downloaded',
                     'Wait for node to sync more blocks (check progress: ./monitor-bitcoin-health.sh)',
-                    'Check sync status: bitcoin-cli -testnet -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
+                    'Check sync status: bitcoin-cli -chain=testnet4 -datadir=$HOME/.bitcoin/testnet4 getblockchaininfo',
                 ];
             }
             else if (rpcError.message?.includes('package topology') ||
@@ -1275,30 +1451,58 @@ router.post('/package', async (req, res) => {
 });
 /**
  * GET /api/broadcast/ready
- * Quick check if Bitcoin Core is ready for broadcasting
+ * Quick check if broadcasting is ready
  * Returns simple JSON: { ready: boolean, reason?: string }
+ * Note: With Charms Prover API, broadcasting is always ready (handled internally)
  */
 router.get('/ready', async (req, res) => {
     try {
+        const broadcastMode = (process.env.BROADCAST_MODE || 'charms').toLowerCase();
+        if (broadcastMode === 'charms') {
+            return res.json({
+                ready: true,
+                reason: 'Charms Prover API handles broadcasting internally. No separate broadcast step required.',
+                broadcastMode: 'charms',
+            });
+        }
+        // Legacy mode - check Bitcoin Core (not recommended)
         const readiness = await isBitcoinCoreReady();
         return res.json({
             ready: readiness.ready,
             reason: readiness.reason,
+            broadcastMode: 'local',
         });
     }
     catch (error) {
         return res.status(500).json({
             ready: false,
-            reason: error.message || 'Error checking Bitcoin Core readiness',
+            reason: error.message || 'Error checking broadcast readiness',
         });
     }
 });
 /**
  * GET /api/broadcast/health
- * Check Bitcoin Core RPC node health status with diagnostic information
+ * Check broadcast health status
+ * Note: With Charms Prover API, Bitcoin Core is not required
  */
 router.get('/health', async (req, res) => {
     try {
+        const broadcastMode = (process.env.BROADCAST_MODE || 'charms').toLowerCase();
+        if (broadcastMode === 'charms') {
+            return res.json({
+                status: 'healthy',
+                message: 'Charms Prover API handles broadcasting internally. Bitcoin Core is not required.',
+                broadcastMode: 'charms',
+                ready: true,
+                rpcConfigured: false,
+                connected: false,
+                diagnostics: {
+                    note: 'Charms requires commit and spell transactions to be broadcast as a package. When using the Charms Prover API, this package submission is performed internally as part of the /spells/prove call using Charms\' full nodes. No separate broadcast step is required or expected from the client.',
+                    bitcoinCoreRequired: false,
+                },
+            });
+        }
+        // Legacy mode - check Bitcoin Core (not recommended)
         const bitcoinRpcConfig = (0, exports.getBitcoinRpcConfig)();
         if (!bitcoinRpcConfig) {
             return res.json({
@@ -1306,10 +1510,11 @@ router.get('/health', async (req, res) => {
                 message: 'Bitcoin Core RPC not configured (BITCOIN_RPC_URL not set)',
                 rpcConfigured: false,
                 ready: false,
-                fallbackEnabled: false,
+                broadcastMode: 'local',
                 diagnostics: {
                     suggestion: 'Set BITCOIN_RPC_URL in your .env file to enable package broadcasting',
                     example: 'BITCOIN_RPC_URL=http://user:password@localhost:18332',
+                    note: 'Consider using BROADCAST_MODE=charms instead (recommended)',
                 },
             });
         }
@@ -1323,11 +1528,12 @@ router.get('/health', async (req, res) => {
                 connected: true,
                 ready: false,
                 loading: true,
-                fallbackEnabled: false,
+                broadcastMode: 'local',
                 diagnostics: {
                     note: health.error || 'Node is initializing. This is normal after starting Bitcoin Core.',
                     progress: 'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
                     estimatedTime: 'Loading typically takes a few minutes depending on blockchain size',
+                    recommendation: 'Consider using BROADCAST_MODE=charms instead (no Bitcoin Core required)',
                 },
             });
         }
@@ -1338,8 +1544,9 @@ router.get('/health', async (req, res) => {
                     'Verify Bitcoin Core is running: ps aux | grep bitcoind',
                     'Check RPC connection: ./check-bitcoin-rpc.sh',
                     'Verify BITCOIN_RPC_URL in .env matches your Bitcoin Core configuration',
-                    'Check Bitcoin Core logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
+                    'Check Bitcoin Core logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
                 ],
+                recommendation: 'Consider using BROADCAST_MODE=charms instead (no Bitcoin Core required)',
             };
             if (health.error) {
                 diagnostics.error = health.error;
@@ -1350,7 +1557,7 @@ router.get('/health', async (req, res) => {
                 rpcConfigured: true,
                 connected: false,
                 ready: false,
-                fallbackEnabled: false,
+                broadcastMode: 'local',
                 diagnostics,
             });
         }
@@ -1360,20 +1567,6 @@ router.get('/health', async (req, res) => {
         const syncProgress = health.blockchain?.headers
             ? ((health.blockchain.blocks / health.blockchain.headers) * 100).toFixed(1)
             : null;
-        let estimatedTimeToReady = null;
-        if (!isSynced && health.blockchain?.headers && health.blockchain?.blocks) {
-            const remainingBlocks = health.blockchain.headers - health.blockchain.blocks;
-            // Assuming average block time for testnet is 2.5 minutes (150 seconds)
-            // This is a rough estimate and can vary greatly
-            const estimatedSeconds = remainingBlocks * 150;
-            const minutes = Math.ceil(estimatedSeconds / 60);
-            if (minutes > 60) {
-                estimatedTimeToReady = `${Math.ceil(minutes / 60)} hours`;
-            }
-            else {
-                estimatedTimeToReady = `${minutes} minutes`;
-            }
-        }
         return res.json({
             status: isHealthy ? 'healthy' : 'syncing',
             message: isHealthy
@@ -1383,7 +1576,7 @@ router.get('/health', async (req, res) => {
             connected: true,
             ready: readiness.ready,
             loading: false,
-            fallbackEnabled: false,
+            broadcastMode: 'local',
             blockchain: {
                 ...health.blockchain,
                 syncProgress: syncProgress ? `${syncProgress}%` : null,
@@ -1394,14 +1587,14 @@ router.get('/health', async (req, res) => {
                 note: readiness.ready
                     ? 'Node is ready for package broadcasting'
                     : 'Node is syncing but can still process recent transactions. Package broadcasting may work but may have limitations.',
-                estimatedTimeToReady: estimatedTimeToReady,
+                recommendation: 'Consider using BROADCAST_MODE=charms instead (no Bitcoin Core required)',
             },
         });
     }
     catch (error) {
         return res.status(500).json({
             status: 'error',
-            message: error.message || 'Error checking Bitcoin Core health',
+            message: error.message || 'Error checking broadcast health',
             error: error.toString ? error.toString() : String(error),
         });
     }

@@ -1152,9 +1152,33 @@ export async function broadcastTransaction(signedTxHex: string): Promise<string>
  */
 export async function broadcastSpellTransactions(
   commitTxHex: string,
-  spellTxHex: string
+  spellTxHex: string,
+  options?: {
+    alreadyBroadcasted?: boolean;
+    commitTxid?: string;
+    spellTxid?: string;
+  }
 ): Promise<{ commitTxid: string; spellTxid: string }> {
   try {
+    // Check if transactions are already broadcast by Prover API
+    // Charms Prover API broadcasts internally as part of /spells/prove
+    // If alreadyBroadcasted is true, skip all local broadcast attempts
+    if (options?.alreadyBroadcasted && options?.commitTxid && options?.spellTxid) {
+      console.log('✅ Transactions already broadcast by Charms Prover API');
+      console.log(`   Commit TXID: ${options.commitTxid}`);
+      console.log(`   Spell TXID: ${options.spellTxid}`);
+      console.log('   Package submission performed internally by Charms Prover API. No separate broadcast step required.');
+      return {
+        commitTxid: options.commitTxid,
+        spellTxid: options.spellTxid,
+      };
+    }
+    
+    // Guard: If alreadyBroadcasted is true but TXIDs missing, this is an error
+    if (options?.alreadyBroadcasted) {
+      throw new Error('Transactions marked as already broadcast but TXIDs are missing. This should not happen with Prover API.');
+    }
+    
     // Step 1: Validate both transactions before broadcasting
     // Per Charms docs: "It is a good idea to validate the transactions before submitting them"
     console.log('🔍 Validating commit transaction...');

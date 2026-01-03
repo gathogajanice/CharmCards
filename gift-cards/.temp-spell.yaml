@@ -1,0 +1,31 @@
+version: 8
+apps:
+  $00: >-
+    n/a463303b0be8b871cfc2963bfdce678c9b3fd0a68c740218ae055f60fe3def1c/5fa3b8adf7e1e71200f5ebf261bc16f6505398cd2ad425199270f382ea439e7e
+  $01: >-
+    t/a463303b0be8b871cfc2963bfdce678c9b3fd0a68c740218ae055f60fe3def1c/5fa3b8adf7e1e71200f5ebf261bc16f6505398cd2ad425199270f382ea439e7e
+ins:
+  - utxo_id: d48fcc2ef7cbe671319883db5e71246b6beb86d8c74d0a129f51b7dafb3e5a89:0
+    charms:
+      $00:
+        brand: Amazon.com
+        image: >-
+          https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain
+        initial_amount: 1000
+        remaining_balance: 1000
+        expiration_date: 1798987217
+        created_at: 1767451217
+      $01: 1000
+outs:
+  - address: tb1py25pp49hyv3z0eslwaceztld43hlwjaf4rh3jytremcqc0r0ml0q8dazvn
+    charms:
+      $00:
+        brand: Amazon.com
+        image: >-
+          https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain
+        initial_amount: 1000
+        remaining_balance: 900
+        expiration_date: 1798987217
+        created_at: 1767451217
+      $01: 900
+    sats: 1000

@@ -8,6 +8,12 @@ const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
   ? 'https://memepool.space/testnet4'
   : 'https://memepool.space';
 
+// Broadcast mode configuration
+// 'charms' = Trust Prover API (default - Prover API broadcasts internally)
+// 'local' = Use Bitcoin Core for local broadcasting
+// 'auto' = Try Prover API first, fallback to local
+const BROADCAST_MODE = (process.env.BROADCAST_MODE || 'charms').toLowerCase() as 'charms' | 'local' | 'auto';
+
 // Bitcoin Core RPC configuration for package broadcasting
 // Per Charms docs: "This is functionally equivalent to bitcoin-cli submitpackage command"
 interface BitcoinRpcConfig {
@@ -1110,8 +1116,25 @@ async function validateTransaction(txHex: string): Promise<TransactionValidation
  * 
  * Request body: transaction hex (plain text)
  * Response: transaction ID (plain text)
+ * 
+ * NOTE: If BROADCAST_MODE=charms (default), this endpoint is disabled because
+ * Charms Prover API handles broadcasting internally as part of /spells/prove
  */
 router.post('/tx', async (req: Request, res: Response) => {
+  // Check broadcast mode - if 'charms', Prover API already handles broadcasting
+  if (BROADCAST_MODE === 'charms') {
+    console.log('ℹ️  BROADCAST_MODE=charms: Charms Prover API handles broadcasting internally');
+    console.log('   Charms Prover API broadcasts transactions internally as part of /spells/prove');
+    console.log('   No local broadcast needed - transactions are already in mempool');
+    
+    return res.status(400).json({
+      error: 'Local broadcasting disabled',
+      message: 'Charms Prover API handles package submission internally. No separate broadcast step is required.',
+      broadcastMode: 'charms',
+      explanation: 'Charms requires commit and spell transactions to be broadcast as a package. When using the Charms Prover API, this package submission is performed internally as part of the /spells/prove call using Charms\' full nodes. No separate broadcast step is required or expected from the client.',
+    });
+  }
+  
   // Declare txHex outside try block so it's accessible in catch block
   let txHex: string | undefined;
   
@@ -1298,9 +1321,26 @@ router.post('/tx', async (req: Request, res: Response) => {
  * POST /api/broadcast/package
  * Broadcast a transaction package (commit + spell) via Bitcoin Core RPC
  * Per Charms docs: "Broadcast both transactions together as a package"
+ * 
+ * NOTE: If BROADCAST_MODE=charms (default), this endpoint returns early because
+ * Charms Prover API already broadcasts transactions internally as part of /spells/prove
  */
 router.post('/package', async (req: Request, res: Response) => {
   try {
+    // Check broadcast mode - if 'charms', Prover API already broadcast
+    if (BROADCAST_MODE === 'charms') {
+      console.log('ℹ️  BROADCAST_MODE=charms: Charms Prover API handles broadcasting internally');
+      console.log('   Charms Prover API broadcasts transactions internally as part of /spells/prove');
+      console.log('   No local broadcast needed - transactions are already in mempool');
+      
+      return res.status(400).json({
+        error: 'Local broadcasting disabled',
+        message: 'Charms Prover API handles package submission internally. No separate broadcast step is required.',
+        broadcastMode: 'charms',
+        explanation: 'Charms requires commit and spell transactions to be broadcast as a package. When using the Charms Prover API, this package submission is performed internally as part of the /spells/prove call using Charms\' full nodes. No separate broadcast step is required or expected from the client.',
+      });
+    }
+    
     const { commitTx, spellTx } = req.body;
 
     if (!commitTx || typeof commitTx !== 'string') {
@@ -1614,30 +1654,60 @@ router.post('/package', async (req: Request, res: Response) => {
 
 /**
  * GET /api/broadcast/ready
- * Quick check if Bitcoin Core is ready for broadcasting
+ * Quick check if broadcasting is ready
  * Returns simple JSON: { ready: boolean, reason?: string }
+ * Note: With Charms Prover API, broadcasting is always ready (handled internally)
  */
 router.get('/ready', async (req: Request, res: Response) => {
   try {
+    const broadcastMode = (process.env.BROADCAST_MODE || 'charms').toLowerCase();
+    if (broadcastMode === 'charms') {
+      return res.json({
+        ready: true,
+        reason: 'Charms Prover API handles broadcasting internally. No separate broadcast step required.',
+        broadcastMode: 'charms',
+      });
+    }
+    // Legacy mode - check Bitcoin Core (not recommended)
     const readiness = await isBitcoinCoreReady();
     return res.json({
       ready: readiness.ready,
       reason: readiness.reason,
+      broadcastMode: 'local',
     });
   } catch (error: any) {
     return res.status(500).json({
       ready: false,
-      reason: error.message || 'Error checking Bitcoin Core readiness',
+      reason: error.message || 'Error checking broadcast readiness',
     });
   }
 });
 
 /**
  * GET /api/broadcast/health
- * Check Bitcoin Core RPC node health status with diagnostic information
+ * Check broadcast health status
+ * Note: With Charms Prover API, Bitcoin Core is not required
  */
 router.get('/health', async (req: Request, res: Response) => {
   try {
+    const broadcastMode = (process.env.BROADCAST_MODE || 'charms').toLowerCase();
+    
+    if (broadcastMode === 'charms') {
+      return res.json({
+        status: 'healthy',
+        message: 'Charms Prover API handles broadcasting internally. Bitcoin Core is not required.',
+        broadcastMode: 'charms',
+        ready: true,
+        rpcConfigured: false,
+        connected: false,
+        diagnostics: {
+          note: 'Charms requires commit and spell transactions to be broadcast as a package. When using the Charms Prover API, this package submission is performed internally as part of the /spells/prove call using Charms\' full nodes. No separate broadcast step is required or expected from the client.',
+          bitcoinCoreRequired: false,
+        },
+      });
+    }
+    
+    // Legacy mode - check Bitcoin Core (not recommended)
     const bitcoinRpcConfig = getBitcoinRpcConfig();
     
     if (!bitcoinRpcConfig) {
@@ -1646,10 +1716,11 @@ router.get('/health', async (req: Request, res: Response) => {
         message: 'Bitcoin Core RPC not configured (BITCOIN_RPC_URL not set)',
         rpcConfigured: false,
         ready: false,
-        fallbackEnabled: false,
+        broadcastMode: 'local',
         diagnostics: {
           suggestion: 'Set BITCOIN_RPC_URL in your .env file to enable package broadcasting',
           example: 'BITCOIN_RPC_URL=http://user:password@localhost:18332',
+          note: 'Consider using BROADCAST_MODE=charms instead (recommended)',
         },
       });
     }
@@ -1665,11 +1736,12 @@ router.get('/health', async (req: Request, res: Response) => {
         connected: true,
         ready: false,
         loading: true,
-        fallbackEnabled: false,
+        broadcastMode: 'local',
         diagnostics: {
           note: health.error || 'Node is initializing. This is normal after starting Bitcoin Core.',
           progress: 'Check node logs: tail -f ~/.bitcoin/testnet4/testnet3/debug.log',
           estimatedTime: 'Loading typically takes a few minutes depending on blockchain size',
+          recommendation: 'Consider using BROADCAST_MODE=charms instead (no Bitcoin Core required)',
         },
       });
     }
@@ -1683,6 +1755,7 @@ router.get('/health', async (req: Request, res: Response) => {
           'Verify BITCOIN_RPC_URL in .env matches your Bitcoin Core configuration',
           'Check Bitcoin Core logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
         ],
+        recommendation: 'Consider using BROADCAST_MODE=charms instead (no Bitcoin Core required)',
       };
 
       if (health.error) {
@@ -1695,7 +1768,7 @@ router.get('/health', async (req: Request, res: Response) => {
         rpcConfigured: true,
         connected: false,
         ready: false,
-        fallbackEnabled: false,
+        broadcastMode: 'local',
         diagnostics,
       });
     }
@@ -1708,20 +1781,6 @@ router.get('/health', async (req: Request, res: Response) => {
       ? ((health.blockchain.blocks / health.blockchain.headers) * 100).toFixed(1)
       : null;
 
-    let estimatedTimeToReady = null;
-    if (!isSynced && health.blockchain?.headers && health.blockchain?.blocks) {
-      const remainingBlocks = health.blockchain.headers - health.blockchain.blocks;
-      // Assuming average block time for testnet is 2.5 minutes (150 seconds)
-      // This is a rough estimate and can vary greatly
-      const estimatedSeconds = remainingBlocks * 150;
-      const minutes = Math.ceil(estimatedSeconds / 60);
-      if (minutes > 60) {
-        estimatedTimeToReady = `${Math.ceil(minutes / 60)} hours`;
-      } else {
-        estimatedTimeToReady = `${minutes} minutes`;
-      }
-    }
-
     return res.json({
       status: isHealthy ? 'healthy' : 'syncing',
       message: isHealthy
@@ -1731,7 +1790,7 @@ router.get('/health', async (req: Request, res: Response) => {
       connected: true,
       ready: readiness.ready,
       loading: false,
-      fallbackEnabled: false,
+      broadcastMode: 'local',
       blockchain: {
         ...health.blockchain,
         syncProgress: syncProgress ? `${syncProgress}%` : null,
@@ -1742,13 +1801,13 @@ router.get('/health', async (req: Request, res: Response) => {
         note: readiness.ready
           ? 'Node is ready for package broadcasting'
           : 'Node is syncing but can still process recent transactions. Package broadcasting may work but may have limitations.',
-        estimatedTimeToReady: estimatedTimeToReady,
+        recommendation: 'Consider using BROADCAST_MODE=charms instead (no Bitcoin Core required)',
       },
     });
   } catch (error: any) {
     return res.status(500).json({
       status: 'error',
-      message: error.message || 'Error checking Bitcoin Core health',
+      message: error.message || 'Error checking broadcast health',
       error: error.toString ? error.toString() : String(error),
     });
   }

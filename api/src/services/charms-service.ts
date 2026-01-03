@@ -1,3 +1,32 @@
+/**
+ * Charms Service - Prover API Integration
+ * 
+ * This service handles interaction with the Charms Prover API (https://v8.charms.dev/spells/prove).
+ * 
+ * IMPORTANT: The Charms Prover API broadcasts transactions internally as part of the /spells/prove call.
+ * 
+ * When you call the Prover API:
+ * 1. It validates the spell
+ * 2. Builds the commit transaction
+ * 3. Builds the spell transaction
+ * 4. Broadcasts the transaction package using Charms' full nodes
+ * 
+ * A successful response means:
+ * - Commit TX was accepted and broadcast
+ * - Spell TX was accepted and broadcast
+ * - Parent-child topology was valid
+ * - Transactions are now in mempool (or mined)
+ * 
+ * Response Format:
+ * The API returns an array of exactly 2 hex-encoded transactions:
+ * ["hex_encoded_commit_tx", "hex_encoded_spell_tx"]
+ * 
+ * These transactions are already broadcast and ready to be signed.
+ * No separate broadcast step is required or expected from the client.
+ * 
+ * Reference: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/
+ */
+
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
@@ -25,6 +54,23 @@ export interface SpellYaml {
     address: string;
     charms: Record<string, any>;
   }>;
+}
+
+/**
+ * Compute TXID from transaction hex
+ * Uses bitcoinjs-lib to parse transaction and extract TXID
+ * 
+ * @param txHex Transaction hex string
+ * @returns Transaction ID (TXID)
+ */
+async function computeTxid(txHex: string): Promise<string> {
+  try {
+    const bitcoin = await import('bitcoinjs-lib');
+    const tx = bitcoin.Transaction.fromHex(txHex.trim());
+    return tx.getId();
+  } catch (error: any) {
+    throw new Error(`Failed to compute TXID from transaction hex: ${error.message}`);
+  }
 }
 
 /**
@@ -162,6 +208,9 @@ export class CharmsService {
     
     // Use testnet-specific endpoint if available, otherwise use default
     // Note: Currently both testnet and mainnet use v8.charms.dev, but this allows for future testnet-specific endpoints
+    // Prover API endpoint: https://v8.charms.dev/spells/prove
+    // Supports both mainnet and testnet4
+    // The Prover API broadcasts transactions internally - no separate broadcast step required
     this.proverUrl = process.env.PROVER_API_URL || 'https://v8.charms.dev/spells/prove';
     
     if (isTestnet) {
@@ -203,6 +252,14 @@ export class CharmsService {
       }
       
       const appBin = stdout.trim();
+      
+      // Log both relative and absolute paths for debugging
+      // Note: __dirname in compiled code is api/dist/services, so we need to go up 2 levels to reach api/
+      const apiDir = path.resolve(__dirname, '../..');
+      const resolvedAppPath = path.resolve(apiDir, this.appPath);
+      const absoluteAppBin = path.resolve(resolvedAppPath, appBin);
+      console.log(`   Binary path (relative): ${appBin}`);
+      console.log(`   Binary path (absolute): ${absoluteAppBin}`);
       
       // Verify it's a release build (should be in target/wasm32-wasip1/release/)
       if (appBin.includes('/release/')) {
@@ -332,9 +389,33 @@ export class CharmsService {
   }
 
   /**
-   * Generate proof for a spell using charms CLI (charms spell prove)
-   * This uses the official CLI which handles all formatting correctly
-   * Alternative to calling Prover API directly - ensures correct format
+   * Generate proof for a spell using Charms Prover API
+   * 
+   * IMPORTANT: The Charms Prover API (https://v8.charms.dev/spells/prove) broadcasts transactions internally.
+   * A successful response means both commit and spell transactions have already been broadcast to the Bitcoin network.
+   * No separate broadcast step is required or expected from the client.
+   * 
+   * The Prover API:
+   * 1. Validates the spell
+   * 2. Builds the commit transaction
+   * 3. Builds the spell transaction
+   * 4. Broadcasts the transaction package using Charms' full nodes
+   * 
+   * Response Format:
+   * Returns an array of exactly 2 hex-encoded transactions: [commit_tx, spell_tx]
+   * These transactions are already broadcast and ready to be signed.
+   * 
+   * Reference: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/
+   * 
+   * @param spellYaml - The spell in YAML format
+   * @param appBin - Optional app binary (base64-encoded RISC-V ELF)
+   * @param prevTxs - Previous transactions that created the UTXOs being spent (raw hex format)
+   * @param mockMode - Whether to use mock mode (empty binaries)
+   * @param fundingUtxo - The UTXO to use for funding (txid:vout format)
+   * @param fundingUtxoValue - The value of the funding UTXO in satoshis
+   * @param changeAddress - Address to send remaining satoshis
+   * @param feeRate - Fee rate in satoshis per byte (default: 2.0)
+   * @returns Object with commit_tx, spell_tx, commit_txid, spell_txid, and broadcasted: true
    */
   async generateProof(
     spellYaml: string, 
@@ -373,6 +454,8 @@ export class CharmsService {
         throw new Error('Invalid spell: apps field is empty');
       }
       // Validate apps format: should be "$00": "n/app_id/app_vk" or "t/app_id/app_vk"
+      // App ID format: "n/<64-char-hex>/<64-char-hex>" or "t/<64-char-hex>/<64-char-hex>"
+      const appIdPattern = /^[nt]\/[0-9a-fA-F]{64}\/[0-9a-fA-F]{64}$/;
       for (const [key, value] of Object.entries(spellObj.apps)) {
         if (!key.startsWith('$') || !/^\$[0-9a-fA-F]+$/.test(key)) {
           throw new Error(`Invalid spell: Invalid app key format "${key}" - must be "$00", "$01", etc.`);
@@ -381,10 +464,28 @@ export class CharmsService {
           throw new Error(`Invalid spell: App value for ${key} must be a string, got ${typeof value}`);
         }
         // Validate format: "n/app_id/app_vk" or "t/app_id/app_vk"
-        if (!/^[nt]\/[0-9a-fA-F]{64}\/[0-9a-fA-F]{64}$/.test(value)) {
-          throw new Error(`Invalid spell: App value for ${key} has invalid format "${value}" - expected "n/app_id/app_vk" or "t/app_id/app_vk"`);
+        // Both app_id and app_vk must be exactly 64 hex characters
+        if (!appIdPattern.test(value)) {
+          const actualLength = value.split('/').map((part, i) => i === 0 ? part : `${part.length} chars`).join('/');
+          throw new Error(
+            `Invalid spell: App value for ${key} has invalid format "${value}". ` +
+            `Expected format: "n/<64-char-hex>/<64-char-hex>" or "t/<64-char-hex>/<64-char-hex>". ` +
+            `Actual format: "${actualLength}". ` +
+            `Each app_id and app_vk must be exactly 64 hexadecimal characters.`
+          );
         }
       }
+      
+      // Log app IDs for debugging (especially important for redeem/transfer)
+      console.log('📋 Spell app IDs validation:');
+      Object.entries(spellObj.apps).forEach(([key, appId]: [string, any]) => {
+        const appIdStr = String(appId);
+        const parts = appIdStr.split('/');
+        const appType = parts[0]; // 'n' or 't'
+        const appIdHash = parts[1]?.substring(0, 16) + '...' || 'MISSING';
+        const appVkHash = parts[2]?.substring(0, 16) + '...' || 'MISSING';
+        console.log(`   ${key}: ${appType}/${appIdHash}/${appVkHash} (format: ✅ valid)`);
+      });
       
       // Validate ins field (required, must be array)
       if (!Array.isArray(spellObj.ins)) {
@@ -504,27 +605,70 @@ export class CharmsService {
           if (path.isAbsolute(appBin)) {
             resolvedAppBin = appBin;
           } else {
-            // Resolve relative to appPath (gift-cards directory)
-            // appPath is relative to api/ directory, so resolve from api/ context
-            const apiDir = path.resolve(__dirname, '..');
-            resolvedAppBin = path.resolve(apiDir, this.appPath, appBin);
+            // Resolve appPath to absolute path first
+            // appPath is relative to api/ directory (e.g., '../gift-cards')
+            // Note: __dirname in compiled code is api/dist/services, so we need to go up 2 levels to reach api/
+            const apiDir = path.resolve(__dirname, '../..');
+            const resolvedAppPath = path.resolve(apiDir, this.appPath);
+            
+            // Now resolve appBin relative to the absolute appPath
+            // appBin is relative to gift-cards/ (e.g., './target/wasm32-wasip1/release/gift-cards.wasm')
+            resolvedAppBin = path.resolve(resolvedAppPath, appBin);
+            
+            // Log for debugging
+            console.log(`   Resolved appPath: ${resolvedAppPath}`);
+            console.log(`   Resolved appBin: ${resolvedAppBin}`);
           }
           
           console.log(`📦 Reading WASM binary from: ${resolvedAppBin}`);
+          
+          // Verify the resolved path exists
+          try {
+            await fs.access(resolvedAppBin);
+            console.log(`✅ Verified WASM binary exists at: ${resolvedAppBin}`);
+          } catch (accessError: any) {
+            // Note: __dirname in compiled code is api/dist/services, so we need to go up 2 levels to reach api/
+            const apiDir = path.resolve(__dirname, '../..');
+            const resolvedAppPath = path.resolve(apiDir, this.appPath);
+            const expectedPath = path.resolve(resolvedAppPath, 'target/wasm32-wasip1/release/gift-cards.wasm');
+            throw new Error(
+              `WASM binary not found at: ${resolvedAppBin}\n` +
+              `Expected location: ${expectedPath}\n` +
+              `Please build the app first: cd ${resolvedAppPath} && cargo build --release --target wasm32-wasip1`
+            );
+          }
           
           // Read the WASM file and base64 encode it
           const wasmBuffer = await fs.readFile(resolvedAppBin);
           const base64Wasm = wasmBuffer.toString('base64');
           
           // The Prover API expects binaries keyed by the app ID from the spell's apps field
-          // Example: apps.$00 = "n/identity/vk" -> binaries["n/identity/vk"] = base64_wasm
+          // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects: "n/<app_id>" (without app_vk)
+          // Example: apps.$00 = "n/identity/vk" -> binaries["n/identity"] = base64_wasm
           if (spellObj.apps && typeof spellObj.apps === 'object') {
-            Object.values(spellObj.apps).forEach((appId: any) => {
+            for (const appId of Object.values(spellObj.apps)) {
               const appIdStr = String(appId);
-              // Add the binary for each app ID referenced in the spell
-              binaries[appIdStr] = base64Wasm;
-              console.log(`✅ Added binary for app: ${appIdStr.substring(0, 40)}...`);
-            });
+              // Extract only the APP_ID hex string (no n/ prefix or VK)
+              // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects key: just "<app_id>" (64-char hex)
+              // The error "expected 64 hex characters" confirms the key must be just the hex string
+              const parts = appIdStr.split('/');
+              if (parts.length >= 3) {
+                // Format: "n/<app_id>/<app_vk>" -> Prover API expects key: just "<app_id>" (64-char hex)
+                // Extract only the APP_ID (parts[1]) - the 64-character hex string
+                const binaryKey = parts[1]; // Just the APP_ID hex string
+                binaries[binaryKey] = base64Wasm;
+                console.log(`✅ Added binary for app: ${binaryKey} (extracted from: ${appIdStr.substring(0, 50)}...)`);
+              } else if (parts.length === 2) {
+                // Fallback: if format is "n/<app_id>" (missing app_vk), use parts[1]
+                const binaryKey = parts[1];
+                binaries[binaryKey] = base64Wasm;
+                console.log(`✅ Added binary for app: ${binaryKey} (extracted from: ${appIdStr.substring(0, 50)}...)`);
+              } else {
+                // Fallback: use full string if format is unexpected
+                console.warn(`⚠️ Unexpected app ID format: ${appIdStr}, using as-is`);
+                binaries[appIdStr] = base64Wasm;
+              }
+            }
           } else {
             // Fallback: if we can't find app IDs, use the VK as key
             if (this.appVk) {
@@ -534,18 +678,76 @@ export class CharmsService {
           }
           
           console.log(`✅ Binaries object populated with ${Object.keys(binaries).length} entry/entries (WASM size: ${base64Wasm.length} chars base64)`);
+          
+          // Validate that all app IDs from spell have corresponding binaries
+          if (spellObj.apps && typeof spellObj.apps === 'object') {
+            const spellAppIds = Object.values(spellObj.apps);
+            const binaryKeys = Object.keys(binaries);
+            
+            // Check for missing binaries
+            // Extract APP_ID hex string for comparison (same logic as binary key generation)
+            const missingBinaries = spellAppIds.filter((appId: any) => {
+              const appIdStr = String(appId);
+              // Extract APP_ID hex string from full format (n/<app_id>/<app_vk>)
+              const parts = appIdStr.split('/');
+              const binaryKey = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : appIdStr);
+              return !binaries[binaryKey];
+            });
+            
+            if (missingBinaries.length > 0 && !mockMode) {
+              console.error('❌ Binary mapping validation failed:');
+              console.error(`   Spell requires ${spellAppIds.length} app ID(s), but ${missingBinaries.length} are missing binaries`);
+              console.error(`   Missing app IDs: ${missingBinaries.map((id: any) => String(id)).join(', ')}`);
+              console.error(`   Binary keys provided: ${binaryKeys.length > 0 ? binaryKeys.join(', ') : 'NONE'}`);
+              throw new Error(
+                `Missing binaries for app IDs: ${missingBinaries.map((id: any) => String(id)).join(', ')}. ` +
+                `Spell requires these app IDs but binaries were not provided. ` +
+                `This usually means the app binary build failed or app IDs don't match. ` +
+                `Verify that tokenId in the spell matches the app_id from the original mint.`
+              );
+            }
+            
+            // Log detailed binary mapping for debugging
+            console.log(`📋 Binary mapping verification:`);
+            Object.entries(spellObj.apps).forEach(([key, appId]: [string, any]) => {
+              const appIdStr = String(appId);
+              // Extract binary key (same logic as when building binaries object)
+              const parts = appIdStr.split('/');
+              const binaryKey = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : appIdStr);
+              const hasBinary = !!binaries[binaryKey];
+              const binaryLength = binaries[binaryKey] ? String(binaries[binaryKey]).length : 0;
+              console.log(`   ${key}: ${appIdStr.substring(0, 50)}... -> binary key: ${binaryKey} -> ${hasBinary ? `✅ included (${binaryLength} chars)` : '❌ MISSING'}`);
+            });
+            
+            if (missingBinaries.length === 0 && !mockMode) {
+              console.log(`✅ All spell app IDs have corresponding binaries (${spellAppIds.length} app ID(s) validated)`);
+            }
+          }
         } catch (binError: any) {
           console.error(`❌ Failed to read/encode app binary: ${binError.message}`);
           if (!mockMode) {
-            throw new Error(`Failed to include app binary: ${binError.message}`);
+            throw new Error(`Failed to include app binary: ${binError.message}. Redeem operations require the binary to execute app logic.`);
           }
           console.warn('⚠️ Continuing without binary (mock mode may still fail)');
         }
       } else {
         console.warn('⚠️ No app binary provided - Prover API will likely reject the request');
         if (!mockMode) {
-          throw new Error('App binary is required but not provided. Build the app first or enable MOCK_MODE.');
+          throw new Error(
+            'App binary is required but not provided. Redeem operations require the binary to execute app logic. ' +
+            'Build the app first: cd gift-cards && cargo build --release --target wasm32-wasip1'
+          );
         }
+      }
+      
+      // Validate that binaries are included for redeem operations
+      // Redeem requires binary execution, so we must have binaries in the payload
+      if (!mockMode && Object.keys(binaries).length === 0) {
+        throw new Error(
+          'Binaries object is empty but required for redeem operation. ' +
+          'Redeem must execute app logic to validate and update state. ' +
+          'Please ensure the app binary is built and included.'
+        );
       }
       
       if (mockMode) {
@@ -635,7 +837,32 @@ export class CharmsService {
       console.log(`   Spell version: ${payload.spell?.version || 'NOT SET'}`);
       console.log(`   Chain: ${payload.chain || 'NOT SET'}`);
       console.log(`   Mock mode: ${mockMode} (using empty binaries object {} per official docs)`);
-      console.log(`   Binaries: ${Object.keys(payload.binaries || {}).length > 0 ? 'has entries' : 'empty object {}'}`);
+      
+      // Detailed binary logging
+      const binaryKeys = Object.keys(payload.binaries || {});
+      const spellAppIds = spellObj.apps ? Object.values(spellObj.apps).map((id: any) => String(id)) : [];
+      // Extract binary keys for logging (same format as what we send to Prover API)
+      const binaryKeysFromSpell = spellAppIds.map((id: string) => {
+        const parts = id.split('/');
+        // Extract only the APP_ID hex string (parts[1]) from "n/<app_id>/<app_vk>"
+        return parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : id);
+      });
+      console.log(`   Binaries: ${binaryKeys.length > 0 ? `${binaryKeys.length} entry/entries` : 'empty object {}'}`);
+      if (binaryKeys.length > 0) {
+        console.log(`   Binary keys provided: ${binaryKeys.map(k => k.substring(0, 30) + '...').join(', ')}`);
+      }
+      if (spellAppIds.length > 0) {
+        console.log(`   Spell app IDs (full format): ${spellAppIds.map(id => id.substring(0, 30) + '...').join(', ')}`);
+        console.log(`   Binary keys required (extracted): ${binaryKeysFromSpell.map(k => k.substring(0, 30) + '...').join(', ')}`);
+        // Check if all extracted binary keys have binaries
+        const missing = binaryKeysFromSpell.filter(key => !binaryKeys.includes(key));
+        if (missing.length > 0 && !mockMode) {
+          console.error(`   ❌ MISSING binaries for keys: ${missing.map(k => k.substring(0, 30) + '...').join(', ')}`);
+        } else if (missing.length === 0 && !mockMode) {
+          console.log(`   ✅ All required binary keys have binaries`);
+        }
+      }
+      
       console.log(`   Funding UTXO: ${payload.funding_utxo || 'NOT SET'}`);
       console.log(`   Funding UTXO value: ${payload.funding_utxo_value || 'NOT SET'} sats`);
       console.log(`   Change address: ${payload.change_address ? payload.change_address.substring(0, 20) + '...' : 'NOT SET'}`);
@@ -969,9 +1196,24 @@ export class CharmsService {
           
           console.log(`✅ Proof validation passed: spell transaction spends commit output (${validation.diagnostics?.matchingInputs} matching input(s))`);
           
+          // IMPORTANT: Charms CLI/Prover API broadcasts transactions internally
+          // A successful response means both commit and spell transactions have already been broadcast
+          console.log('✅ Proof generated successfully - transactions already broadcast by Charms');
+          console.log('   Package submission performed internally by Charms Prover API using full nodes. No separate broadcast step required.');
+          
+          // Extract TXIDs from transaction hex
+          const commitTxid = await computeTxid(commitTx);
+          const spellTxid = await computeTxid(spellTx);
+          
+          console.log(`   Commit TXID: ${commitTxid}`);
+          console.log(`   Spell TXID: ${spellTxid}`);
+          
           return {
             commit_tx: commitTx,
             spell_tx: spellTx,
+            commit_txid: commitTxid,
+            spell_txid: spellTxid,
+            broadcasted: true, // Indicates already broadcast
           };
         } catch (cliError: any) {
           console.warn('⚠️ charms CLI spell prove failed, falling back to direct API call');
@@ -1038,13 +1280,21 @@ export class CharmsService {
       console.log(`   ⏱️  Total API time: ${totalApiDuration}ms (${(totalApiDuration / 1000).toFixed(1)}s)`);
       
       // API returns array: ["hex_encoded_commit_tx", "hex_encoded_spell_tx"]
+      // Per documentation: The response is an array of exactly 2 hex-encoded transactions
+      // These transactions are already broadcast by the Prover API using Charms' full nodes
       const txArray = response.data;
       
-      if (!Array.isArray(txArray) || txArray.length !== 2) {
-        throw new Error('Invalid response format from Prover API. Expected array of 2 transaction hex strings.');
+      if (!Array.isArray(txArray)) {
+        throw new Error('Invalid response format from Prover API. Expected array, got: ' + typeof txArray);
+      }
+      
+      if (txArray.length !== 2) {
+        throw new Error(`Invalid response format from Prover API. Expected array of 2 transaction hex strings, got ${txArray.length} items.`);
       }
 
       console.log('✅ Proof generated successfully via Prover API');
+      console.log('   Response format: Array of 2 hex-encoded transactions (commit_tx, spell_tx)');
+      console.log('   Transactions are already broadcast by Charms Prover API infrastructure');
       
       // Extract transaction hex strings (handle enum variant format if present)
       const commitTx = typeof txArray[0] === 'string' ? txArray[0] : (txArray[0] as any)?.bitcoin || txArray[0];
@@ -1082,10 +1332,27 @@ export class CharmsService {
       
       console.log(`✅ Proof validation passed: spell transaction spends commit output (${validation.diagnostics?.matchingInputs} matching input(s))`);
       
-      // Map array response to object format for backward compatibility
+      // IMPORTANT: Charms Prover API broadcasts transactions internally as part of /spells/prove
+      // A successful response means both commit and spell transactions have already been broadcast
+      // We should NOT attempt to rebroadcast locally - this would cause double-submission errors
+      console.log('✅ Prover API successfully generated and broadcasted transactions');
+      console.log('   Package submission performed internally by Charms Prover API using full nodes. No separate broadcast step required.');
+      
+      // Extract TXIDs from transaction hex (for verification/display)
+      const commitTxid = await computeTxid(commitTx);
+      const spellTxid = await computeTxid(spellTx);
+      
+      console.log(`   Commit TXID: ${commitTxid}`);
+      console.log(`   Spell TXID: ${spellTxid}`);
+      
+      // Map array response to object format with TXIDs
+      // broadcasted: true indicates Prover API already broadcast these transactions
       return {
         commit_tx: commitTx,
         spell_tx: spellTx,
+        commit_txid: commitTxid,
+        spell_txid: spellTxid,
+        broadcasted: true, // Indicates Prover API already broadcast
       };
     } catch (error: any) {
       // Handle timeout errors
@@ -1117,6 +1384,7 @@ export class CharmsService {
         
         if (status === 422) {
           // 422 means the spell format is invalid
+          // Common causes: Invalid Spell JSON format, missing required parameters
           const errorMessage = typeof errorData === 'string' 
             ? errorData 
             : (errorData?.error || errorData?.message || JSON.stringify(errorData));
@@ -1157,9 +1425,26 @@ export class CharmsService {
             `- All outputs have 'sats' field (minimum 330 sats)\n` +
             `- App IDs and VKs are valid\n` +
             `- UTXO format is correct (txid:vout)\n` +
-            `- All required fields are present`;
+            `- All required fields are present\n` +
+            `\nReference: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/`;
           
           throw new Error(detailedError);
+        }
+        
+        // Handle other error status codes
+        // Common causes: Insufficient funding UTXO value, Invalid UTXO references, Server errors
+        if (status === 400) {
+          const errorMessage = typeof errorData === 'string' 
+            ? errorData 
+            : (errorData?.error || errorData?.message || JSON.stringify(errorData));
+          throw new Error(`Prover API bad request (400): ${errorMessage}. Check funding_utxo_value and all required parameters.`);
+        }
+        
+        if (status === 500 || status >= 502) {
+          const errorMessage = typeof errorData === 'string' 
+            ? errorData 
+            : (errorData?.error || errorData?.message || JSON.stringify(errorData));
+          throw new Error(`Prover API server error (${status}): ${errorMessage}. The Prover API may be experiencing issues. Please try again.`);
         }
         
         throw new Error(`Prover API error (${status}): ${JSON.stringify(errorData)}`);

@@ -282,11 +282,16 @@ router.post('/mint', async (req: Request, res: Response) => {
       feeRate
     );
 
+    // Check if Prover API already broadcast (indicated by broadcasted flag and TXIDs)
+    const isAlreadyBroadcasted = proof.broadcasted === true && proof.commit_txid && proof.spell_txid;
+    
     res.json({
       success: true,
       spell: spellYaml,
       proof,
-      message: 'Gift card spell created successfully. Sign and broadcast to complete minting.',
+      message: isAlreadyBroadcasted
+        ? 'Gift card spell created and broadcasted successfully by Charms Prover API. Please sign transactions to complete minting.'
+        : 'Gift card spell created successfully. Sign and broadcast to complete minting.',
     });
   } catch (error: any) {
     console.error('❌ Error minting gift card:', error);
@@ -431,6 +436,31 @@ router.post('/redeem', async (req: Request, res: Response) => {
       throw new Error(`No previous transaction hex available for UTXO ${fundingUtxo}. Cannot proceed without prev_txs.`);
     }
 
+    // Fix app_vk in spell if it's incorrect (using tokenId instead of actual VK)
+    // The frontend may send tokenId for both app_id and app_vk, but app_vk must be the actual VK
+    const actualAppVk = await charmsService.getAppVk();
+    if (spell.apps && typeof spell.apps === 'object') {
+      let appVkFixed = false;
+      Object.entries(spell.apps).forEach(([key, appIdValue]: [string, any]) => {
+        const appIdStr = String(appIdValue);
+        const parts = appIdStr.split('/');
+        if (parts.length >= 3) {
+          const appId = parts[1];
+          const appVk = parts[2];
+          // If app_vk matches app_id, it's wrong - replace with actual VK
+          if (appVk === appId) {
+            spell.apps[key] = `${parts[0]}/${appId}/${actualAppVk}`;
+            appVkFixed = true;
+            console.log(`✅ Fixed app_vk for ${key}: replaced ${appVk.substring(0, 16)}... with ${actualAppVk.substring(0, 16)}...`);
+          }
+        }
+      });
+      
+      if (appVkFixed) {
+        console.log('✅ Corrected app_vk in spell to match actual WASM binary VK');
+      }
+    }
+
     // Convert spell object to YAML for validation
     const yaml = require('js-yaml');
     const spellYaml = yaml.dump(spell);
@@ -447,19 +477,33 @@ router.post('/redeem', async (req: Request, res: Response) => {
     }
 
     // Generate proof with app binary
+    // IMPORTANT: Redeem operations ALWAYS require the binary - no mock mode allowed
+    // Redeem must execute app logic to validate redemption rules and update state
     let appBin: string | undefined;
     try {
       appBin = await charmsService.buildApp();
+      console.log(`✅ App binary built for redeem operation`);
     } catch (buildError: any) {
-      const mockMode = process.env.MOCK_MODE === 'true';
-      if (mockMode) {
-        console.warn('⚠️ App build failed, but MOCK_MODE is enabled - proceeding without app_bins');
-      } else {
-        console.error('❌ App build failed:', buildError.message);
-        throw new Error(`Failed to build app: ${buildError.message}. Set MOCK_MODE=true to skip building.`);
-      }
+      // Redeem ALWAYS requires binary - no mock mode allowed
+      console.error('❌ App build failed for redeem:', buildError.message);
+      throw new Error(
+        `Redeem operation requires app binary. Failed to build: ${buildError.message}. ` +
+        `Redeem cannot work in mock mode - it needs to execute app logic to update state. ` +
+        `Please ensure the gift-cards app builds successfully. Run: cd gift-cards && cargo build --release --target wasm32-wasip1`
+      );
     }
-    const mockMode = process.env.MOCK_MODE === 'true';
+    
+    // Ensure we have binary before proceeding
+    if (!appBin) {
+      throw new Error(
+        'App binary is required for redeem operations but was not built. ' +
+        'Redeem must execute app logic to validate and update state. ' +
+        'Please ensure the gift-cards app builds successfully.'
+      );
+    }
+    
+    // Redeem always requires binary - do not use mock mode
+    const mockMode = false;
     
     // Extract funding info from validated UTXO
     const fundingUtxoValue = utxoValidation.utxo.value;
@@ -495,6 +539,16 @@ router.post('/redeem', async (req: Request, res: Response) => {
       statusCode = 400; // Bad request for validation issues
     } else if (error.message?.includes('Prover API')) {
       statusCode = 502; // Bad gateway for Prover API issues
+      // Enhance Prover API error messages for binary-related issues
+      if (error.message?.includes('app binary not found') || error.message?.includes('binary')) {
+        errorMessage = `${errorMessage}. Redeem operations require the app binary to execute logic. ` +
+          `Please ensure the gift-cards app is built: cd gift-cards && cargo build --release --target wasm32-wasip1`;
+      }
+    } else if (error.message?.includes('binary') || error.message?.includes('build')) {
+      statusCode = 500;
+      errorMessage = `${errorMessage}. Redeem operations require the app binary to execute app logic and update state. ` +
+        `This is different from minting which can work in mock mode. ` +
+        `Please ensure the gift-cards app builds successfully.`;
     } else if (error.response?.status) {
       statusCode = error.response.status;
     }
@@ -613,6 +667,31 @@ router.post('/transfer', async (req: Request, res: Response) => {
       throw new Error(`No previous transaction hex available for UTXO ${fundingUtxo}. Cannot proceed without prev_txs.`);
     }
 
+    // Fix app_vk in spell if it's incorrect (using tokenId instead of actual VK)
+    // The frontend may send tokenId for both app_id and app_vk, but app_vk must be the actual VK
+    const actualAppVk = await charmsService.getAppVk();
+    if (spell.apps && typeof spell.apps === 'object') {
+      let appVkFixed = false;
+      Object.entries(spell.apps).forEach(([key, appIdValue]: [string, any]) => {
+        const appIdStr = String(appIdValue);
+        const parts = appIdStr.split('/');
+        if (parts.length >= 3) {
+          const appId = parts[1];
+          const appVk = parts[2];
+          // If app_vk matches app_id, it's wrong - replace with actual VK
+          if (appVk === appId) {
+            spell.apps[key] = `${parts[0]}/${appId}/${actualAppVk}`;
+            appVkFixed = true;
+            console.log(`✅ Fixed app_vk for ${key}: replaced ${appVk.substring(0, 16)}... with ${actualAppVk.substring(0, 16)}...`);
+          }
+        }
+      });
+      
+      if (appVkFixed) {
+        console.log('✅ Corrected app_vk in spell to match actual WASM binary VK');
+      }
+    }
+
     // Convert spell object to YAML for validation
     const yaml = require('js-yaml');
     const spellYaml = yaml.dump(spell);
@@ -629,19 +708,33 @@ router.post('/transfer', async (req: Request, res: Response) => {
     }
 
     // Generate proof with app binary
+    // IMPORTANT: Transfer operations ALWAYS require the binary - no mock mode allowed
+    // Transfer must execute app logic to move NFT and tokens to new address
     let appBin: string | undefined;
     try {
       appBin = await charmsService.buildApp();
+      console.log(`✅ App binary built for transfer operation`);
     } catch (buildError: any) {
-      const mockMode = process.env.MOCK_MODE === 'true';
-      if (mockMode) {
-        console.warn('⚠️ App build failed, but MOCK_MODE is enabled - proceeding without app_bins');
-      } else {
-        console.error('❌ App build failed:', buildError.message);
-        throw new Error(`Failed to build app: ${buildError.message}. Set MOCK_MODE=true to skip building.`);
-      }
+      // Transfer ALWAYS requires binary - no mock mode allowed
+      console.error('❌ App build failed for transfer:', buildError.message);
+      throw new Error(
+        `Transfer operation requires app binary. Failed to build: ${buildError.message}. ` +
+        `Transfer cannot work in mock mode - it needs to execute app logic to move NFT and tokens. ` +
+        `Please ensure the gift-cards app builds successfully. Run: cd gift-cards && cargo build --release --target wasm32-wasip1`
+      );
     }
-    const mockMode = process.env.MOCK_MODE === 'true';
+    
+    // Ensure we have binary before proceeding
+    if (!appBin) {
+      throw new Error(
+        'App binary is required for transfer operations but was not built. ' +
+        'Transfer must execute app logic to move NFT and tokens. ' +
+        'Please ensure the gift-cards app builds successfully.'
+      );
+    }
+    
+    // Transfer always requires binary - do not use mock mode
+    const mockMode = false;
     
     // Extract funding info from validated UTXO
     const fundingUtxoValue = utxoValidation.utxo.value;
@@ -677,6 +770,16 @@ router.post('/transfer', async (req: Request, res: Response) => {
       statusCode = 400; // Bad request for validation issues
     } else if (error.message?.includes('Prover API')) {
       statusCode = 502; // Bad gateway for Prover API issues
+      // Enhance Prover API error messages for binary-related issues
+      if (error.message?.includes('app binary not found') || error.message?.includes('binary')) {
+        errorMessage = `${errorMessage}. Transfer operations require the app binary to execute logic. ` +
+          `Please ensure the gift-cards app is built: cd gift-cards && cargo build --release --target wasm32-wasip1`;
+      }
+    } else if (error.message?.includes('binary') || error.message?.includes('build')) {
+      statusCode = 500;
+      errorMessage = `${errorMessage}. Transfer operations require the app binary to execute app logic and move NFT/tokens. ` +
+        `This is different from minting which can work in mock mode. ` +
+        `Please ensure the gift-cards app builds successfully.`;
     } else if (error.response?.status) {
       statusCode = error.response.status;
     }

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Service Management Script
-# Checks and starts Bitcoin Core, Backend API, and Frontend services
+# Checks and starts Backend API and Frontend services
 
 set -e
 
@@ -16,7 +16,6 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-DATA_DIR="$HOME/.bitcoin/testnet4"
 BACKEND_PORT=3001
 FRONTEND_PORT=3000
 STATUS_ONLY=false
@@ -45,14 +44,6 @@ for arg in "$@"; do
     esac
 done
 
-# Check if bitcoin-cli is available
-BITCOIN_CLI=""
-if command -v bitcoin-cli &> /dev/null; then
-    BITCOIN_CLI="bitcoin-cli"
-elif [ -f ~/.local/bin/bitcoin-cli ]; then
-    BITCOIN_CLI=~/.local/bin/bitcoin-cli
-fi
-
 # Function to check if a port is in use
 check_port() {
     local port=$1
@@ -66,38 +57,6 @@ check_port() {
         # Fallback: try to connect
         timeout 1 bash -c "echo > /dev/tcp/localhost/$port" 2>/dev/null
     fi
-}
-
-# Function to check Bitcoin Core status
-check_bitcoin_core() {
-    local status="stopped"
-    local details=""
-    
-    # Check if process is running
-    if pgrep -x "bitcoind" > /dev/null; then
-        # Check if RPC is responding
-        if [ -n "$BITCOIN_CLI" ]; then
-            local rpc_test=$($BITCOIN_CLI -chain=testnet4 -datadir="$DATA_DIR" getblockchaininfo 2>/dev/null)
-            if [ $? -eq 0 ]; then
-                status="running"
-                # Extract sync info
-                local blocks=$(echo "$rpc_test" | python3 -c "import sys, json; print(json.load(sys.stdin).get('blocks', 0))" 2>/dev/null || echo "?")
-                local headers=$(echo "$rpc_test" | python3 -c "import sys, json; print(json.load(sys.stdin).get('headers', 0))" 2>/dev/null || echo "?")
-                local progress=$(echo "$rpc_test" | python3 -c "import sys, json; print(f\"{json.load(sys.stdin).get('verificationprogress', 0)*100:.1f}\")" 2>/dev/null || echo "?")
-                if [ "$blocks" != "?" ] && [ "$headers" != "?" ]; then
-                    details=" (Blocks: $blocks/$headers, Progress: ${progress}%)"
-                fi
-            else
-                status="starting"
-                details=" (RPC not ready yet)"
-            fi
-        else
-            status="running"
-            details=" (bitcoin-cli not found, cannot verify RPC)"
-        fi
-    fi
-    
-    echo "$status|$details"
 }
 
 # Function to check Backend API status
@@ -138,44 +97,6 @@ check_frontend() {
     fi
     
     echo "$status|$details"
-}
-
-# Function to start Bitcoin Core
-start_bitcoin_core() {
-    echo -e "${BLUE}Starting Bitcoin Core...${NC}"
-    if [ ! -d "$DATA_DIR" ]; then
-        echo -e "${YELLOW}⚠️  Bitcoin data directory not found: $DATA_DIR${NC}"
-        echo "   Run ./setup-bitcoin-node.sh first"
-        return 1
-    fi
-    
-    if pgrep -x "bitcoind" > /dev/null; then
-        echo -e "${YELLOW}⚠️  Bitcoin Core is already running${NC}"
-        return 0
-    fi
-    
-    bitcoind -testnet -datadir="$DATA_DIR" -daemon
-    echo -e "${GREEN}✅ Bitcoin Core started (daemon mode)${NC}"
-    echo "   Waiting for RPC to be ready..."
-    sleep 3
-    
-    # Wait up to 30 seconds for RPC to be ready
-    local max_wait=30
-    local waited=0
-    while [ $waited -lt $max_wait ]; do
-        if [ -n "$BITCOIN_CLI" ]; then
-            $BITCOIN_CLI -chain=testnet4 -datadir="$DATA_DIR" getblockchaininfo > /dev/null 2>&1
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}✅ Bitcoin Core RPC is ready!${NC}"
-                return 0
-            fi
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-    
-    echo -e "${YELLOW}⚠️  Bitcoin Core started but RPC not ready yet (may take up to 60 seconds)${NC}"
-    return 0
 }
 
 # Function to start Backend API
@@ -265,12 +186,9 @@ echo "======================================"
 echo ""
 
 # Check status of all services
-BITCOIN_STATUS=$(check_bitcoin_core)
 BACKEND_STATUS=$(check_backend)
 FRONTEND_STATUS=$(check_frontend)
 
-BITCOIN_STATE=$(echo "$BITCOIN_STATUS" | cut -d'|' -f1)
-BITCOIN_DETAILS=$(echo "$BITCOIN_STATUS" | cut -d'|' -f2)
 BACKEND_STATE=$(echo "$BACKEND_STATUS" | cut -d'|' -f1)
 BACKEND_DETAILS=$(echo "$BACKEND_STATUS" | cut -d'|' -f2)
 FRONTEND_STATE=$(echo "$FRONTEND_STATUS" | cut -d'|' -f1)
@@ -279,15 +197,6 @@ FRONTEND_DETAILS=$(echo "$FRONTEND_STATUS" | cut -d'|' -f2)
 # Display status
 echo -e "${BLUE}Service Status:${NC}"
 echo ""
-
-# Bitcoin Core
-if [ "$BITCOIN_STATE" = "running" ]; then
-    echo -e "  ${GREEN}✅ Bitcoin Core: RUNNING${NC}${BITCOIN_DETAILS}"
-elif [ "$BITCOIN_STATE" = "starting" ]; then
-    echo -e "  ${YELLOW}⏳ Bitcoin Core: STARTING${NC}${BITCOIN_DETAILS}"
-else
-    echo -e "  ${RED}❌ Bitcoin Core: STOPPED${NC}"
-fi
 
 # Backend API
 if [ "$BACKEND_STATE" = "running" ]; then
@@ -315,13 +224,8 @@ if [ "$STATUS_ONLY" = true ]; then
 fi
 
 # Determine what needs to be started
-NEEDS_BITCOIN=false
 NEEDS_BACKEND=false
 NEEDS_FRONTEND=false
-
-if [ "$BITCOIN_STATE" != "running" ]; then
-    NEEDS_BITCOIN=true
-fi
 
 if [ "$BACKEND_STATE" != "running" ]; then
     NEEDS_BACKEND=true
@@ -332,7 +236,7 @@ if [ "$FRONTEND_STATE" != "running" ]; then
 fi
 
 # If all services are running, exit
-if [ "$NEEDS_BITCOIN" = false ] && [ "$NEEDS_BACKEND" = false ] && [ "$NEEDS_FRONTEND" = false ]; then
+if [ "$NEEDS_BACKEND" = false ] && [ "$NEEDS_FRONTEND" = false ]; then
     echo -e "${GREEN}✅ All services are running!${NC}"
     echo ""
     echo "🌐 Access your application:"
@@ -345,9 +249,6 @@ fi
 if [ "$START_ALL" = false ]; then
     echo -e "${YELLOW}Some services are not running.${NC}"
     echo ""
-    if [ "$NEEDS_BITCOIN" = true ]; then
-        echo "  • Bitcoin Core needs to be started"
-    fi
     if [ "$NEEDS_BACKEND" = true ]; then
         echo "  • Backend API needs to be started"
     fi
@@ -368,11 +269,6 @@ echo ""
 echo -e "${CYAN}Starting services...${NC}"
 echo ""
 
-if [ "$NEEDS_BITCOIN" = true ]; then
-    start_bitcoin_core
-    echo ""
-fi
-
 if [ "$NEEDS_BACKEND" = true ]; then
     start_backend
     echo ""
@@ -387,21 +283,13 @@ fi
 echo -e "${CYAN}Final Status:${NC}"
 sleep 2
 
-BITCOIN_STATUS=$(check_bitcoin_core)
 BACKEND_STATUS=$(check_backend)
 FRONTEND_STATUS=$(check_frontend)
 
-BITCOIN_STATE=$(echo "$BITCOIN_STATUS" | cut -d'|' -f1)
 BACKEND_STATE=$(echo "$BACKEND_STATUS" | cut -d'|' -f1)
 FRONTEND_STATE=$(echo "$FRONTEND_STATUS" | cut -d'|' -f1)
 
 echo ""
-if [ "$BITCOIN_STATE" = "running" ]; then
-    echo -e "  ${GREEN}✅ Bitcoin Core: RUNNING${NC}"
-else
-    echo -e "  ${YELLOW}⏳ Bitcoin Core: Starting...${NC}"
-fi
-
 if [ "$BACKEND_STATE" = "running" ]; then
     echo -e "  ${GREEN}✅ Backend API: RUNNING${NC}"
 else
@@ -421,7 +309,6 @@ echo "📝 Notes:"
 echo "   • Services are running in the background"
 echo "   • Check logs: /tmp/charm-cards-*.log"
 echo "   • Frontend may take 30-60 seconds to fully start"
-echo "   • Bitcoin Core RPC may take up to 60 seconds to be ready"
 echo ""
 echo "🌐 Access your application:"
 echo "   Frontend: http://localhost:$FRONTEND_PORT"

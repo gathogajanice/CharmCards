@@ -1002,18 +1002,48 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           );
           
           console.log('Transactions signed successfully!');
-          toast.success('✅ Transactions signed! Broadcasting to network...');
           
-          // Step 5: Broadcast transactions
-          setTxStatus('broadcasting');
-          const { commitTxid, spellTxid } = await broadcastSpellTransactions(
-            signedCommitTx,
-            signedSpellTx
-          );
+          // Step 5: Use TXIDs from Prover API response
+          // Charms Prover API broadcasts internally as part of /spells/prove
+          // Package submission is performed internally using Charms' full nodes
+          // No separate broadcast step is required or expected
+          let commitTxid: string;
+          let spellTxid: string;
+          
+          if (proof.broadcasted && proof.commit_txid && proof.spell_txid) {
+            // Prover API already broadcast - use TXIDs from response
+            console.log('✅ Transactions already broadcast by Charms Prover API');
+            console.log(`   Commit TXID: ${proof.commit_txid}`);
+            console.log(`   Spell TXID: ${proof.spell_txid}`);
+            console.log('   Package submission performed internally by Charms Prover API. No separate broadcast step required.');
+            commitTxid = proof.commit_txid;
+            spellTxid = proof.spell_txid;
+            toast.success('✅ Transactions broadcast by Charms Prover API!');
+            setTxStatus('confirming');
+          } else {
+            // This should not happen - Prover API should always broadcast
+            // But handle gracefully for edge cases
+            console.warn('⚠️ Prover API response missing broadcasted flag or TXIDs');
+            console.warn('   This should not happen with Charms Prover API');
+            console.warn('   Attempting fallback broadcast (this may fail if BROADCAST_MODE=charms)');
+            toast.warning('⚠️ Prover API response incomplete, attempting fallback...');
+            setTxStatus('broadcasting');
+            const broadcastResult = await broadcastSpellTransactions(
+              signedCommitTx,
+              signedSpellTx,
+              {
+                alreadyBroadcasted: proof.broadcasted || false,
+                commitTxid: proof.commit_txid,
+                spellTxid: proof.spell_txid,
+              }
+            );
+            commitTxid = broadcastResult.commitTxid;
+            spellTxid = broadcastResult.spellTxid;
+            setTxStatus('confirming');
+          }
           
           setCommitTxid(commitTxid);
           setSpellTxid(spellTxid);
-          setTxStatus('confirming');
           
           // Show epic success toast with all details
           showEpicSuccessToast({
