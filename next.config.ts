@@ -28,6 +28,14 @@ const nextConfig: NextConfig = {
         path.resolve(__dirname, '..'),
       ];
     }
+    
+    // Use empty stub for async-storage (React Native only, not needed for web)
+    // This prevents build errors from @metamask/sdk trying to import React Native modules
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@react-native-async-storage/async-storage': path.resolve(__dirname, 'src/lib/async-storage-stub.ts'),
+    };
+    
     return config;
   },
   // Note: Turbopack handles dependencies differently than webpack
