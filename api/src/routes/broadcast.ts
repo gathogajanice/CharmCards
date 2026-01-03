@@ -170,6 +170,8 @@ export async function getBitcoinNodeHealth(config: BitcoinRpcConfig): Promise<{
     headers: number;
     verificationProgress: number;
     initialBlockDownload: boolean;
+    pruned?: boolean;
+    pruneHeight?: number;
   };
   network?: {
     connections: number;
@@ -197,6 +199,8 @@ export async function getBitcoinNodeHealth(config: BitcoinRpcConfig): Promise<{
         headers: blockchainInfo.result?.headers || 0,
         verificationProgress: blockchainInfo.result?.verificationprogress || 0,
         initialBlockDownload: blockchainInfo.result?.initialblockdownload || false,
+        pruned: blockchainInfo.result?.pruned || false,
+        pruneHeight: blockchainInfo.result?.pruneheight || 0,
       },
       network: {
         connections: networkInfo.result?.connections || 0,
@@ -689,16 +693,59 @@ async function submitTransactionsSequentially(
                           error.message?.includes('missingorspent');
     
     if (isUtxoNotFound) {
-      const enhancedError: any = new Error(
-        `Sequential submission failed: Bitcoin Core doesn't have the UTXO data needed. ` +
-        `The commit transaction spends a UTXO that Bitcoin Core hasn't synced yet. ` +
-        `This is a sync issue - Bitcoin Core needs to download more blocks to have the UTXO data. ` +
-        `Current sync: ~60% complete. Please wait for Bitcoin Core to sync more blocks.`
-      );
+      // Get actual sync status and prune info for accurate error message
+      let syncInfo = '';
+      let isPrunedNode = false;
+      let pruneHeight = 0;
+      try {
+        const blockchainInfo = await callBitcoinRpc('getblockchaininfo', [], config);
+        const blocks = blockchainInfo.result?.blocks || 0;
+        const headers = blockchainInfo.result?.headers || 0;
+        const progress = blockchainInfo.result?.verificationprogress || 0;
+        const progressPercent = (progress * 100).toFixed(1);
+        const ibd = blockchainInfo.result?.initialblockdownload || false;
+        isPrunedNode = blockchainInfo.result?.pruned || false;
+        pruneHeight = blockchainInfo.result?.pruneheight || 0;
+        
+        if (ibd && headers > 0) {
+          const blockPercent = ((blocks / headers) * 100).toFixed(1);
+          syncInfo = `Current sync: ${blockPercent}% (${blocks.toLocaleString()}/${headers.toLocaleString()} blocks, verification: ${progressPercent}%)`;
+        } else if (progress > 0) {
+          syncInfo = `Current sync: ${progressPercent}% complete (${blocks.toLocaleString()} blocks)`;
+        } else {
+          syncInfo = `Current sync: ${blocks.toLocaleString()} blocks synced`;
+        }
+        
+        if (isPrunedNode && pruneHeight > 0) {
+          syncInfo += `. Node is PRUNED (prune height: ${pruneHeight.toLocaleString()}) - only blocks after ${pruneHeight.toLocaleString()} are available`;
+        }
+      } catch (syncError: any) {
+        // If we can't get sync status, use generic message
+        syncInfo = 'Unable to determine sync status';
+      }
+      
+      // Determine if this is a prune issue or sync issue
+      const errorMessage = isPrunedNode && pruneHeight > 0
+        ? `Sequential submission failed: Bitcoin Core cannot verify the UTXO because it's from a pruned block. ` +
+          `The node is pruned (prune height: ${pruneHeight.toLocaleString()}) and only has blocks after ${pruneHeight.toLocaleString()}. ` +
+          `The UTXO you're trying to spend is from a block that was pruned. ` +
+          `Solution: Use a UTXO from a recent block (after ${pruneHeight.toLocaleString()}) or disable pruning. ` +
+          `${syncInfo}`
+        : `Sequential submission failed: Bitcoin Core doesn't have the UTXO data needed. ` +
+          `The commit transaction spends a UTXO that Bitcoin Core hasn't synced yet. ` +
+          `This is a sync issue - Bitcoin Core needs to download more blocks to have the UTXO data. ` +
+          `${syncInfo}. Please wait for Bitcoin Core to sync more blocks.`;
+      
+      const enhancedError: any = new Error(errorMessage);
       enhancedError.originalError = error.message;
-      enhancedError.errorType = 'utxo_not_synced';
-      enhancedError.errorCode = 'UTXO_NOT_SYNCED';
-      enhancedError.isSyncIssue = true;
+      enhancedError.errorType = isPrunedNode ? 'utxo_pruned' : 'utxo_not_synced';
+      enhancedError.errorCode = isPrunedNode ? 'UTXO_PRUNED' : 'UTXO_NOT_SYNCED';
+      // Only set isSyncIssue for actual sync issues (when node is NOT pruned)
+      // Pruned issues should NOT be marked as sync issues
+      enhancedError.isSyncIssue = !isPrunedNode;
+      enhancedError.isPrunedIssue = isPrunedNode;
+      enhancedError.pruneHeight = pruneHeight;
+      console.log(`🔍 Error type detected: ${enhancedError.errorType} (isPrunedIssue: ${isPrunedNode}, isSyncIssue: ${!isPrunedNode})`);
       throw enhancedError;
     }
     
@@ -843,12 +890,43 @@ async function broadcastPackageViaBitcoinRpc(
       try {
         return await submitTransactionsSequentially(commitTxHex, spellTxHex, config);
       } catch (fallbackError: any) {
-        // Check if fallback failed due to sync issue
+        // Check for pruned issues FIRST (before sync issues)
+        // Pruned errors should be propagated as-is, not treated as sync errors
+        const isPrunedIssue = fallbackError.isPrunedIssue || 
+                             fallbackError.errorType === 'utxo_pruned' ||
+                             fallbackError.errorCode === 'UTXO_PRUNED';
+        
+        if (isPrunedIssue) {
+          // This is a pruned issue - propagate the pruned error
+          const enhancedError: any = new Error(
+            `Package topology error and sequential fallback failed due to pruned UTXO. ` +
+            `${fallbackError.message || 'Bitcoin Core cannot verify the UTXO because it\'s from a pruned block.'} ` +
+            `Original error: ${error.message}. ` +
+            `Fallback error: ${fallbackError.message}`
+          );
+          enhancedError.originalError = error.message;
+          enhancedError.fallbackError = fallbackError.message;
+          enhancedError.errorType = 'utxo_pruned';
+          enhancedError.errorCode = 'UTXO_PRUNED';
+          enhancedError.isPrunedIssue = true;
+          enhancedError.isSyncIssue = false;
+          enhancedError.pruneHeight = fallbackError.pruneHeight || 0;
+          enhancedError.diagnostics = {
+            topologyCheck: topologyCheck.diagnostics,
+            commitStructure,
+            spellStructure,
+            recommendation: 'Use a UTXO from a recent block (after the prune height) or disable pruning.',
+          };
+          console.log(`🔍 Fallback error detected as PRUNED issue: ${enhancedError.errorType}, prune height: ${enhancedError.pruneHeight}`);
+          throw enhancedError;
+        }
+        
+        // Check if fallback failed due to sync issue (only if NOT pruned)
         const isSyncIssue = fallbackError.isSyncIssue || 
                            fallbackError.errorType === 'utxo_not_synced' ||
                            fallbackError.errorType === 'sync_required' ||
-                           fallbackError.message?.includes("doesn't have the UTXO data") ||
-                           fallbackError.message?.includes('bad-txns-inputs-missingorspent');
+                           (fallbackError.message?.includes("doesn't have the UTXO data") && !isPrunedIssue) ||
+                           (fallbackError.message?.includes('bad-txns-inputs-missingorspent') && !isPrunedIssue);
         
         if (isSyncIssue) {
           // This is a sync issue - provide clear guidance
@@ -863,12 +941,14 @@ async function broadcastPackageViaBitcoinRpc(
           enhancedError.errorType = 'sync_required';
           enhancedError.errorCode = 'SYNC_REQUIRED';
           enhancedError.isSyncIssue = true;
+          enhancedError.isPrunedIssue = false;
           enhancedError.diagnostics = {
             topologyCheck: topologyCheck.diagnostics,
             commitStructure,
             spellStructure,
             recommendation: 'Wait for Bitcoin Core to finish syncing. The node needs to download blocks containing the UTXO you\'re trying to spend.',
           };
+          console.log(`🔍 Fallback error detected as SYNC issue: ${enhancedError.errorType}`);
           throw enhancedError;
         }
         
@@ -1387,18 +1467,72 @@ router.post('/package', async (req: Request, res: Response) => {
           'Node may be overloaded or still syncing',
           'Check node logs: tail -f ~/.bitcoin/testnet4/testnet4/debug.log',
         ];
+      } else if (rpcError.isPrunedIssue || rpcError.errorType === 'utxo_pruned' || rpcError.errorCode === 'UTXO_PRUNED') {
+        // Specific error for pruned block issues - check this BEFORE sync issues
+        errorType = 'utxo_pruned';
+        errorCode = 'UTXO_PRUNED';
+        const pruneHeight = rpcError.pruneHeight || 0;
+        const nodeBlocks = rpcError.nodeBlocks || 0;
+        console.log(`🔍 Package endpoint: Detected PRUNED issue (errorType: ${rpcError.errorType}, errorCode: ${rpcError.errorCode}, pruneHeight: ${pruneHeight})`);
+        troubleshooting = [
+          'Bitcoin Core node is PRUNED and cannot verify UTXOs from pruned blocks',
+          `Prune height: ${pruneHeight.toLocaleString()} (node only has blocks after this)`,
+          `Current node blocks: ${nodeBlocks.toLocaleString()} (100% synced)`,
+          `The UTXO you're trying to spend is from a block before ${pruneHeight.toLocaleString()}`,
+          'Pruned nodes only keep the last ~550MB of blocks and delete older block data',
+          '',
+          'SOLUTION: Get a fresh UTXO from the faucet',
+          `  • New coins will be from recent blocks (after ${pruneHeight.toLocaleString()})`,
+          '  • These will work with your pruned node',
+          '  • Use the Testnet4 faucet to get fresh testnet coins',
+          '',
+          'Alternative: Disable pruning in bitcoin.conf (requires full re-sync from scratch)',
+        ];
       } else if (rpcError.isSyncIssue ||
                  rpcError.errorType === 'sync_required' ||
                  rpcError.errorType === 'utxo_not_synced' ||
-                 (rpcError.message?.includes('bad-txns-inputs-missingorspent') && rpcError.fallbackError?.includes('bad-txns-inputs-missingorspent'))) {
+                 (rpcError.message?.includes('bad-txns-inputs-missingorspent') && 
+                  rpcError.fallbackError?.includes('bad-txns-inputs-missingorspent'))) {
+        // Only treat as sync issue if it's NOT a pruned issue (pruned check already happened above)
         errorType = 'sync_required';
         errorCode = 'SYNC_REQUIRED';
+        console.log(`🔍 Package endpoint: Detected SYNC issue (isSyncIssue: ${rpcError.isSyncIssue}, errorType: ${rpcError.errorType})`);
+        
+        // Get actual sync status for accurate troubleshooting message
+        let syncStatusMsg = 'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health';
+        try {
+          const blockchainInfo = await callBitcoinRpc('getblockchaininfo', [], bitcoinRpcConfig);
+          const blocks = blockchainInfo.result?.blocks || 0;
+          const headers = blockchainInfo.result?.headers || 0;
+          const progress = blockchainInfo.result?.verificationprogress || 0;
+          const progressPercent = (progress * 100).toFixed(1);
+          const ibd = blockchainInfo.result?.initialblockdownload || false;
+          const isPruned = blockchainInfo.result?.pruned || false;
+          const pruneHeight = blockchainInfo.result?.pruneheight || 0;
+          
+          if (ibd && headers > 0) {
+            const blockPercent = ((blocks / headers) * 100).toFixed(1);
+            syncStatusMsg = `The node is currently ${blockPercent}% synced (${blocks.toLocaleString()}/${headers.toLocaleString()} blocks, verification: ${progressPercent}%) - it needs to sync blocks containing your UTXO`;
+          } else if (progress > 0) {
+            syncStatusMsg = `The node is currently ${progressPercent}% synced (${blocks.toLocaleString()} blocks) - it needs to sync blocks containing your UTXO`;
+          } else {
+            syncStatusMsg = `The node has synced ${blocks.toLocaleString()} blocks - it needs to sync blocks containing your UTXO`;
+          }
+          
+          if (isPruned && pruneHeight > 0) {
+            syncStatusMsg += `. Note: Node is pruned (prune height: ${pruneHeight.toLocaleString()}) - only blocks after ${pruneHeight.toLocaleString()} are available`;
+          }
+        } catch (syncError: any) {
+          // If we can't get sync status, use generic message
+          syncStatusMsg = 'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health';
+        }
+        
         troubleshooting = [
           'Bitcoin Core hasn\'t synced enough blocks to have the UTXO data needed',
           'The commit transaction spends a UTXO that Bitcoin Core hasn\'t downloaded yet',
           'This is a sync issue - you need to wait for Bitcoin Core to sync more blocks',
           'Check sync status: ./check-bitcoin-rpc.sh or curl http://localhost:3001/api/broadcast/health',
-          'The node is currently ~60% synced - it needs to sync blocks containing your UTXO',
+          syncStatusMsg,
         ];
       } else if (rpcError.message?.includes('bad-txns-inputs-missingorspent') || rpcError.message?.includes('inputs-missingorspent')) {
         errorType = 'utxo_not_found';

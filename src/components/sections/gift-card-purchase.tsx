@@ -332,7 +332,7 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       });
       
       // Validate balance format and value
-      let validatedBalance: number = currentBalance;
+      let validatedBalance: number = currentBalance || 0;
       
       if (currentBalance === null || currentBalance === undefined) {
         console.error('❌ Balance Check Failed: Balance is null or undefined');
@@ -458,20 +458,32 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
       const delays = [2000, 4000, 6000, 8000, 10000, 12000, 15000, 20000]; // Longer delays: 2s, 4s, 6s, 8s, 10s, 12s, 15s, 20s
       let lastUtxoError: string | null = null;
       
-      // Get node block height for filtering synced UTXOs
+      // Get node block height and prune height for filtering synced UTXOs
       let nodeBlocks: number | undefined = undefined;
+      let pruneHeight: number | undefined = undefined;
+      console.log('🔍 Fetching node sync status and prune height...');
       try {
         const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
         const healthResponse = await fetch(`${API_URL}/api/broadcast/health`, { cache: 'no-store' });
         if (healthResponse.ok) {
           const healthData = await healthResponse.json();
           nodeBlocks = healthData?.blockchain?.blocks;
-          if (nodeBlocks) {
-            console.log(`📊 Node has synced ${nodeBlocks.toLocaleString()} blocks - will filter UTXOs accordingly`);
+          pruneHeight = healthData?.blockchain?.pruneHeight;
+          console.log(`📊 Node Status:`);
+          console.log(`   Blocks synced: ${nodeBlocks?.toLocaleString() || 'unknown'}`);
+          console.log(`   Pruned: ${healthData?.blockchain?.pruned ? 'Yes' : 'No'}`);
+          if (pruneHeight) {
+            console.log(`   Prune height: ${pruneHeight.toLocaleString()} (only blocks after this are available)`);
+            console.log(`   Available blocks: ${nodeBlocks && pruneHeight ? (nodeBlocks - pruneHeight).toLocaleString() : 'unknown'}`);
+          } else {
+            console.log(`   Prune height: Not pruned (all blocks available)`);
           }
+        } else {
+          console.warn(`⚠️ Health endpoint returned status ${healthResponse.status}`);
         }
       } catch (healthError) {
-        console.warn('Could not fetch node sync status, will use all UTXOs:', healthError);
+        console.warn('❌ Could not fetch node sync status:', healthError);
+        console.warn('   Will attempt to use all UTXOs, but validation may fail');
       }
       
       // Optional: Validate address matches expected address (for testing/debugging only)
@@ -495,31 +507,87 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           if (utxos.length > 0) {
             console.log(`✅ Found ${utxos.length} UTXOs on attempt ${attempt + 1}`);
             
-            // Filter UTXOs to prefer synced ones
-            console.log('🔍 Filtering UTXOs by sync status...');
-            const { syncedUtxos, unsyncedUtxos, unconfirmedUtxos } = await filterSyncedUtxos(utxos, address, nodeBlocks);
+            // Filter UTXOs to prefer synced ones (and reject pruned ones)
+            console.log('🔍 Filtering UTXOs by sync status and prune height...');
+            console.log(`   Input: ${utxos.length} total UTXOs`);
+            console.log(`   Node blocks: ${nodeBlocks?.toLocaleString() || 'unknown'}`);
+            console.log(`   Prune height: ${pruneHeight?.toLocaleString() || 'not pruned'}`);
             
-            console.log(`   ✅ Synced UTXOs: ${syncedUtxos.length}`);
-            console.log(`   ⏳ Unsynced UTXOs: ${unsyncedUtxos.length}`);
+            const { syncedUtxos, unsyncedUtxos, prunedUtxos, unconfirmedUtxos } = await filterSyncedUtxos(utxos, address, nodeBlocks, pruneHeight);
+            
+            console.log(`📊 Filtering Results:`);
+            console.log(`   ✅ Synced UTXOs: ${syncedUtxos.length}${syncedUtxos.length > 0 ? ` (blocks: ${syncedUtxos.map(u => u.blockHeight || 'unknown').join(', ')})` : ''}`);
+            console.log(`   ⏳ Unsynced UTXOs: ${unsyncedUtxos.length}${unsyncedUtxos.length > 0 ? ` (blocks: ${unsyncedUtxos.map(u => `${u.blockHeight} (needs ${u.blocksNeeded} more)`).join(', ')})` : ''}`);
+            console.log(`   ✂️ Pruned UTXOs (cannot use): ${prunedUtxos.length}${prunedUtxos.length > 0 ? ` (blocks: ${prunedUtxos.map(u => u.blockHeight || 'unknown').join(', ')})` : ''}`);
             console.log(`   ⚠️ Unconfirmed UTXOs: ${unconfirmedUtxos.length}`);
             
-            // Prefer synced UTXOs, then unconfirmed, then unsynced
-            let selectedUtxo: { txid: string; vout: number; value: number } | null = null;
+            if (prunedUtxos.length > 0) {
+              console.warn(`⚠️ Found ${prunedUtxos.length} UTXO(s) from pruned blocks - these cannot be verified by the pruned node`);
+              console.warn(`   Prune height: ${pruneHeight?.toLocaleString()}, Pruned UTXOs are from blocks: ${prunedUtxos.map(u => u.blockHeight).join(', ')}`);
+              prunedUtxos.forEach((u, i) => {
+                console.warn(`   Pruned UTXO #${i + 1}: ${u.txid}:${u.vout} (block ${u.blockHeight}, before prune height ${pruneHeight?.toLocaleString()})`);
+              });
+            }
+            
+            // Prefer synced UTXOs, then unconfirmed
+            // Only use unsynced UTXOs if we don't have node block info (node info unavailable)
+            let selectedUtxo: { txid: string; vout: number; value: number; blockHeight?: number } | null = null;
             
             if (syncedUtxos.length > 0) {
-              // Use first synced UTXO (already sorted by block height if available)
-              selectedUtxo = syncedUtxos[0];
+              // Use first synced UTXO (prefer most recent - highest block height)
+              // Sort by block height descending to get most recent first
+              const sortedSynced = [...syncedUtxos].sort((a, b) => {
+                const aHeight = a.blockHeight || 0;
+                const bHeight = b.blockHeight || 0;
+                return bHeight - aHeight; // Descending order
+              });
+              selectedUtxo = sortedSynced[0];
               console.log(`✅ Selected synced UTXO: ${selectedUtxo.txid}:${selectedUtxo.vout} (block ${selectedUtxo.blockHeight || 'unknown'})`);
             } else if (unconfirmedUtxos.length > 0) {
-              // Use unconfirmed UTXO (node should be able to process it)
+              // Use unconfirmed UTXO (node should be able to process it from mempool)
               selectedUtxo = unconfirmedUtxos[0];
-              console.log(`⚠️ Selected unconfirmed UTXO: ${selectedUtxo.txid}:${selectedUtxo.vout} (node should handle it)`);
-            } else if (unsyncedUtxos.length > 0) {
-              // Last resort: use unsynced UTXO (may fail, but worth trying)
+              console.log(`⚠️ Selected unconfirmed UTXO: ${selectedUtxo.txid}:${selectedUtxo.vout} (node should handle it from mempool)`);
+            } else if (unsyncedUtxos.length > 0 && nodeBlocks === undefined) {
+              // Only use unsynced UTXOs if we don't have node block info
+              // This means we can't verify sync status, so we'll try anyway
               const utxo = unsyncedUtxos[0];
               selectedUtxo = utxo;
-              console.warn(`⚠️ Selected unsynced UTXO: ${utxo.txid}:${utxo.vout} (block ${utxo.blockHeight}, needs ${utxo.blocksNeeded} more blocks)`);
-              console.warn(`   This may fail if the node hasn't synced enough blocks yet`);
+              console.warn(`⚠️ Selected unsynced UTXO: ${utxo.txid}:${utxo.vout} (node sync status unknown)`);
+              console.warn(`   Node block info unavailable - proceeding but may fail if node hasn't synced this block`);
+            } else if (unsyncedUtxos.length > 0 && nodeBlocks !== undefined) {
+              // TEMPORARY WORKAROUND: Allow unsynced UTXOs up to 65,000 blocks ahead
+              // This allows transactions to be attempted while node is syncing
+              // They may fail initially but can be retried as node catches up
+              const utxo = unsyncedUtxos[0];
+              const blocksNeeded = utxo.blocksNeeded || 0;
+              
+              // Allow if within 65,000 blocks (aggressive mode for syncing nodes)
+              if (blocksNeeded > 0 && blocksNeeded <= 65000) {
+                selectedUtxo = utxo;
+                console.warn(`⚠️ Selected unsynced UTXO (AGGRESSIVE MODE): ${utxo.txid}:${utxo.vout}`);
+                console.warn(`   Block ${utxo.blockHeight} is ${blocksNeeded.toLocaleString()} blocks ahead (node at ${nodeBlocks.toLocaleString()})`);
+                console.warn(`   ⚠️ WARNING: This will likely fail until node syncs more blocks. Retry every 30 minutes as node progresses.`);
+                console.warn(`   Node is actively syncing - transaction may succeed once node catches up.`);
+              } else if (blocksNeeded > 65000) {
+                // Too far ahead even for aggressive mode
+                console.error(`❌ Cannot use unsynced UTXO: ${utxo.txid}:${utxo.vout}`);
+                console.error(`   Block ${utxo.blockHeight} is ${blocksNeeded.toLocaleString()} blocks ahead (node at ${nodeBlocks.toLocaleString()})`);
+                console.error(`   This is too far ahead even in aggressive mode (>65,000 blocks)`);
+                lastUtxoError = `No synced UTXOs available. Node has synced ${nodeBlocks.toLocaleString()} blocks, but UTXOs are from block ${utxo.blockHeight} (needs ${blocksNeeded.toLocaleString()} more blocks). Please wait for sync or get a fresh UTXO from the faucet.`;
+              } else {
+                // Shouldn't happen, but handle it
+                console.error(`❌ Cannot use unsynced UTXO: ${utxo.txid}:${utxo.vout}`);
+                lastUtxoError = `No synced UTXOs available. Please wait for node to sync more blocks.`;
+              }
+            }
+            
+            // Check if we only have pruned UTXOs available
+            if (!selectedUtxo && prunedUtxos.length > 0 && syncedUtxos.length === 0 && unconfirmedUtxos.length === 0 && unsyncedUtxos.length === 0) {
+              const prunedUtxo = prunedUtxos[0];
+              console.error(`❌ Cannot use pruned UTXO: ${prunedUtxo.txid}:${prunedUtxo.vout}`);
+              console.error(`   Block ${prunedUtxo.blockHeight} is before prune height ${pruneHeight?.toLocaleString()}`);
+              console.error(`   Pruned nodes cannot verify UTXOs from pruned blocks`);
+              lastUtxoError = `No usable UTXOs available. All your UTXOs are from pruned blocks (before block ${pruneHeight?.toLocaleString()}).\n\nYour Bitcoin Core node is PRUNED and only keeps blocks after ${pruneHeight?.toLocaleString()}. It cannot verify UTXOs from older blocks.\n\nSOLUTION:\n• Get fresh testnet coins from the faucet\n• New coins will be from recent blocks (after ${pruneHeight?.toLocaleString()})\n• These will work with your pruned node\n\nSteps:\n1. Use the Testnet4 faucet to get new testnet coins\n2. Wait for the transaction to confirm (1-2 minutes)\n3. Click "Refresh" button above to update your balance\n4. Try minting again - the new UTXO will work`;
             }
             
             if (selectedUtxo) {
@@ -528,7 +596,9 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
               break;
             } else {
               console.warn(`⚠️ No usable UTXOs found after filtering`);
-              lastUtxoError = 'No usable UTXOs found after filtering by sync status';
+              if (!lastUtxoError) {
+                lastUtxoError = 'No usable UTXOs found after filtering by sync status and prune height';
+              }
             }
           } else {
             console.warn(`⚠️ No UTXOs found on attempt ${attempt + 1}, but balance exists (${validatedBalance} BTC)`);
@@ -565,12 +635,57 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
           utxos = await getWalletUtxos(address, null);
           if (utxos.length > 0) {
             // Filter on final attempt too
-            const { syncedUtxos, unsyncedUtxos, unconfirmedUtxos } = await filterSyncedUtxos(utxos, address, nodeBlocks);
+            console.log('🔍 Final attempt: Filtering UTXOs by sync status and prune height...');
+            const { syncedUtxos, unsyncedUtxos, prunedUtxos, unconfirmedUtxos } = await filterSyncedUtxos(utxos, address, nodeBlocks, pruneHeight);
             
-            let selectedUtxo = syncedUtxos[0] || unconfirmedUtxos[0] || unsyncedUtxos[0];
+            console.log(`📊 Final attempt filtering results:`);
+            console.log(`   ✅ Synced UTXOs: ${syncedUtxos.length}`);
+            console.log(`   ⏳ Unsynced UTXOs: ${unsyncedUtxos.length}`);
+            console.log(`   ✂️ Pruned UTXOs: ${prunedUtxos.length}`);
+            console.log(`   ⚠️ Unconfirmed UTXOs: ${unconfirmedUtxos.length}`);
+            
+            // Only use synced or unconfirmed UTXOs (not pruned or unsynced)
+            // Prefer synced, then unconfirmed
+            let selectedUtxo: { txid: string; vout: number; value: number; blockHeight?: number } | null = null;
+            
+            if (syncedUtxos.length > 0) {
+              // Sort by block height descending to get most recent first
+              const sortedSynced = [...syncedUtxos].sort((a, b) => {
+                const aHeight = a.blockHeight || 0;
+                const bHeight = b.blockHeight || 0;
+                return bHeight - aHeight;
+              });
+              selectedUtxo = sortedSynced[0];
+              console.log(`✅ Selected synced UTXO on final attempt: ${selectedUtxo.txid}:${selectedUtxo.vout} (block ${selectedUtxo.blockHeight || 'unknown'})`);
+            } else if (unconfirmedUtxos.length > 0) {
+              selectedUtxo = unconfirmedUtxos[0];
+              console.log(`⚠️ Selected unconfirmed UTXO on final attempt: ${selectedUtxo.txid}:${selectedUtxo.vout}`);
+            }
+            
             if (selectedUtxo) {
               inUtxo = `${selectedUtxo.txid}:${selectedUtxo.vout}`;
               console.log(`✅ Got UTXO on final attempt: ${inUtxo}`);
+            } else if (prunedUtxos.length > 0) {
+              const prunedUtxo = prunedUtxos[0];
+              console.error(`❌ Only pruned UTXOs available on final attempt - cannot use them`);
+              console.error(`   Pruned UTXO: ${prunedUtxo.txid}:${prunedUtxo.vout} (block ${prunedUtxo.blockHeight}, parent pruned: ${prunedUtxo.parentPruned || false})`);
+              lastUtxoError = `No usable UTXOs available. All UTXOs are from pruned blocks (before block ${pruneHeight?.toLocaleString()}) or have pruned parent transactions.\n\nYour Bitcoin Core node is PRUNED and only keeps blocks after ${pruneHeight?.toLocaleString()}. It cannot verify UTXOs from older blocks.\n\nSOLUTION:\n• Get fresh testnet coins from the faucet\n• New coins will be from recent blocks (after ${pruneHeight?.toLocaleString()})\n• These will work with your pruned node\n\nSteps:\n1. Use the Testnet4 faucet to get new testnet coins\n2. Wait for the transaction to confirm (1-2 minutes)\n3. Click "Refresh" button above to update your balance\n4. Try minting again - the new UTXO will work`;
+            } else if (unsyncedUtxos.length > 0) {
+              // TEMPORARY WORKAROUND: Allow unsynced UTXOs in aggressive mode on final attempt
+              const utxo = unsyncedUtxos[0];
+              const blocksNeeded = utxo.blocksNeeded || 0;
+              
+              if (blocksNeeded > 0 && blocksNeeded <= 65000) {
+                selectedUtxo = utxo;
+                console.warn(`⚠️ Selected unsynced UTXO on final attempt (AGGRESSIVE MODE): ${utxo.txid}:${utxo.vout}`);
+                console.warn(`   Block ${utxo.blockHeight} is ${blocksNeeded.toLocaleString()} blocks ahead`);
+                console.warn(`   ⚠️ WARNING: This will likely fail until node syncs more blocks. Retry every 30 minutes.`);
+                inUtxo = `${selectedUtxo.txid}:${selectedUtxo.vout}`;
+                console.log(`✅ Got UTXO on final attempt (aggressive): ${inUtxo}`);
+              } else {
+                console.error(`❌ Only unsynced UTXOs available on final attempt - too far ahead (${blocksNeeded.toLocaleString()} blocks)`);
+                lastUtxoError = `No synced UTXOs available. UTXOs are ${blocksNeeded.toLocaleString()} blocks ahead. Please wait for node to sync more blocks or get a fresh UTXO from the faucet.`;
+              }
             }
           }
         } catch (finalError: any) {
@@ -637,9 +752,186 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         return;
       }
 
-      // Step 4: Create spell and generate proof
+      // Step 4: Validate UTXO before creating transaction
+      // Final check to ensure UTXO is not from a pruned block
+      // Fetch prune height again if not available
+      if (inUtxo && !pruneHeight) {
+        try {
+          const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+          const healthResponse = await fetch(`${API_URL}/api/broadcast/health`, { cache: 'no-store' });
+          if (healthResponse.ok) {
+            const healthData = await healthResponse.json();
+            pruneHeight = healthData?.blockchain?.pruneHeight;
+            if (pruneHeight) {
+              console.log(`✂️ Fetched prune height: ${pruneHeight.toLocaleString()}`);
+            }
+          }
+        } catch (healthError) {
+          console.warn('Could not fetch prune height for validation:', healthError);
+        }
+      }
+      
+      if (inUtxo && pruneHeight) {
+        console.log(`🔍 Pre-transaction validation: Checking UTXO ${inUtxo} against prune height ${pruneHeight.toLocaleString()}...`);
+        try {
+          const [txid, voutStr] = inUtxo.split(':');
+          const vout = parseInt(voutStr, 10);
+          
+          // Fetch transaction to check block height
+          const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
+          const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
+            ? 'https://memepool.space/testnet4'
+            : 'https://memepool.space';
+          
+          const txUrl = `${MEMEPOOL_BASE_URL}/api/tx/${txid}`;
+          const txResponse = await fetch(txUrl, { signal: AbortSignal.timeout(5000) });
+          
+          if (txResponse.ok) {
+            const txData = await txResponse.json();
+            const blockHeight = txData?.status?.block_height;
+            
+            // Check if UTXO transaction itself is from a pruned block
+            if (blockHeight !== undefined && blockHeight <= pruneHeight) {
+              // UTXO is from a pruned block - reject it
+              setTxStatus('error');
+              const errorMsg = `Cannot use UTXO ${inUtxo}: it's from block ${blockHeight.toLocaleString()}, which is before the prune height (${pruneHeight.toLocaleString()}). The node is pruned and cannot verify this UTXO. Please get a fresh UTXO from the faucet.`;
+              setTxError(errorMsg);
+              toast.error('UTXO from pruned block');
+              toast.info(`Get a fresh UTXO from the faucet (must be from a block after ${pruneHeight.toLocaleString()})`);
+              setIsMinting(false);
+              return;
+            }
+            
+            // Check parent transaction (the transaction that created the input to this UTXO)
+            // Bitcoin Core needs to verify the entire chain, so if parent is pruned, it will fail
+            if (blockHeight !== undefined && txData.vin && txData.vin.length > 0) {
+              try {
+                const firstInput = txData.vin[0];
+                if (firstInput.txid) {
+                  console.log(`🔍 Checking parent transaction ${firstInput.txid}...`);
+                  const parentTxUrl = `${MEMEPOOL_BASE_URL}/api/tx/${firstInput.txid}`;
+                  const parentResponse = await fetch(parentTxUrl, { signal: AbortSignal.timeout(3000) });
+                  
+                  if (parentResponse.ok) {
+                    const parentTxData = await parentResponse.json();
+                    const parentBlockHeight = parentTxData?.status?.block_height;
+                    
+                    if (parentBlockHeight !== undefined && parentBlockHeight <= pruneHeight) {
+                      // Parent transaction is from a pruned block - reject UTXO
+                      setTxStatus('error');
+                      const errorMsg = `Cannot use UTXO ${inUtxo}: its parent transaction is from block ${parentBlockHeight.toLocaleString()}, which is before the prune height (${pruneHeight.toLocaleString()}).\n\nBitcoin Core needs to verify the entire transaction chain, and pruned nodes cannot verify pruned parent transactions.\n\nYour Bitcoin Core node is PRUNED and only keeps blocks after ${pruneHeight.toLocaleString()}. It cannot verify UTXOs with pruned parents.\n\nSOLUTION:\n• Get fresh testnet coins from the faucet\n• New coins will be from recent blocks (after ${pruneHeight.toLocaleString()})\n• These will work with your pruned node\n\nSteps:\n1. Use the Testnet4 faucet to get new testnet coins\n2. Wait for the transaction to confirm (1-2 minutes)\n3. Click "Refresh" button above to update your balance\n4. Try minting again - the new UTXO will work`;
+                      setTxError(errorMsg);
+                      toast.error('Parent transaction from pruned block');
+                      toast.info(`Get fresh testnet coins from faucet (must be from block after ${pruneHeight.toLocaleString()})`);
+                      setIsMinting(false);
+                      return;
+                    } else if (parentBlockHeight !== undefined) {
+                      console.log(`✅ Parent transaction validation passed: parent is from block ${parentBlockHeight.toLocaleString()} (after prune height ${pruneHeight.toLocaleString()})`);
+                    }
+                  }
+                }
+              } catch (parentError: any) {
+                console.warn(`⚠️ Could not check parent transaction: ${parentError.message}`);
+                // Continue anyway - the filtering should have caught it
+              }
+            }
+            
+            if (blockHeight !== undefined) {
+              console.log(`✅ UTXO validation passed: ${inUtxo} is from block ${blockHeight.toLocaleString()} (after prune height ${pruneHeight.toLocaleString()})`);
+            }
+          }
+        } catch (validationError: any) {
+          console.warn(`⚠️ Could not validate UTXO block height: ${validationError.message}`);
+          // Continue anyway - the filtering should have caught it
+        }
+      }
+
+      // Step 5: Create spell and generate proof
       setTxStatus('generating-proof');
       toast.info('Creating spell and generating proof...');
+
+      // Final validation: Check UTXO one more time before creating transaction
+      // This is a last safety check to ensure UTXO is not pruned
+      if (inUtxo && pruneHeight) {
+        console.log(`🔍 Final pre-transaction validation: Double-checking UTXO ${inUtxo} against prune height ${pruneHeight.toLocaleString()}...`);
+        try {
+          const [txid, voutStr] = inUtxo.split(':');
+          const vout = parseInt(voutStr, 10);
+          
+          const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
+          const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
+            ? 'https://memepool.space/testnet4'
+            : 'https://memepool.space';
+          
+          const txUrl = `${MEMEPOOL_BASE_URL}/api/tx/${txid}`;
+          const txResponse = await fetch(txUrl, { signal: AbortSignal.timeout(5000) });
+          
+          if (txResponse.ok) {
+            const txData = await txResponse.json();
+            const blockHeight = txData?.status?.block_height;
+            
+            // Check UTXO block height
+            if (blockHeight !== undefined && blockHeight <= pruneHeight) {
+              setTxStatus('error');
+              const errorMsg = `Cannot proceed: UTXO ${inUtxo} is from block ${blockHeight.toLocaleString()}, which is before the prune height (${pruneHeight.toLocaleString()}). The node is pruned and cannot verify this UTXO.\n\nSolution: Get a fresh UTXO from the faucet. New coins will be from recent blocks (after ${pruneHeight.toLocaleString()}) and will work with your pruned node.`;
+              setTxError(errorMsg);
+              toast.error('UTXO from pruned block detected');
+              toast.info(`Get fresh testnet coins from faucet (must be from block after ${pruneHeight.toLocaleString()})`);
+              setIsMinting(false);
+              return;
+            }
+            
+            // Check ALL parent transactions
+            if (txData.vin && txData.vin.length > 0) {
+              let foundPrunedParent = false;
+              let prunedParentBlock = 0;
+              
+              for (const input of txData.vin) {
+                if (input.txid) {
+                  try {
+                    const parentTxUrl = `${MEMEPOOL_BASE_URL}/api/tx/${input.txid}`;
+                    const parentResponse = await fetch(parentTxUrl, { signal: AbortSignal.timeout(3000) });
+                    
+                    if (parentResponse.ok) {
+                      const parentTxData = await parentResponse.json();
+                      const parentBlockHeight = parentTxData?.status?.block_height;
+                      
+                      if (parentBlockHeight !== undefined && parentBlockHeight <= pruneHeight) {
+                        foundPrunedParent = true;
+                        prunedParentBlock = parentBlockHeight;
+                        break;
+                      }
+                    }
+                  } catch (parentError) {
+                    // If we can't check parent, be conservative and reject
+                    console.warn(`Could not verify parent transaction ${input.txid} - rejecting UTXO to be safe`);
+                    foundPrunedParent = true;
+                    break;
+                  }
+                }
+              }
+              
+              if (foundPrunedParent) {
+                setTxStatus('error');
+                const errorMsg = `Cannot proceed: UTXO ${inUtxo} has a parent transaction from block ${prunedParentBlock > 0 ? prunedParentBlock.toLocaleString() : 'unknown'}, which is before the prune height (${pruneHeight.toLocaleString()}). Bitcoin Core needs to verify the entire transaction chain, and pruned nodes cannot verify pruned parent transactions.\n\nSolution: Get a fresh UTXO from the faucet. New coins will be from recent blocks and will work with your pruned node.`;
+                setTxError(errorMsg);
+                toast.error('Parent transaction from pruned block');
+                toast.info(`Get fresh testnet coins from faucet (must be from block after ${pruneHeight.toLocaleString()})`);
+                setIsMinting(false);
+                return;
+              }
+            }
+            
+            console.log(`✅ Final validation passed: UTXO ${inUtxo} is from block ${blockHeight?.toLocaleString() || 'unconfirmed'} (safe for pruned node)`);
+          } else {
+            // Can't verify - be conservative if node is pruned
+            console.warn(`Could not verify UTXO ${inUtxo} block height - proceeding but may fail if pruned`);
+          }
+        } catch (validationError: any) {
+          console.warn(`Final UTXO validation error: ${validationError.message}`);
+          // Continue anyway - the earlier filtering should have caught it
+        }
+      }
 
       // Get Taproot address - Charms requires Taproot addresses
       // Note: If user has non-Taproot address, the TaprootAddressModal should have appeared on connection
