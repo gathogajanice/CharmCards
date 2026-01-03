@@ -474,8 +474,9 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
         console.warn('Could not fetch node sync status, will use all UTXOs:', healthError);
       }
       
-      // Optional: Validate address matches expected address (for testing/debugging)
-      // Set NEXT_PUBLIC_EXPECTED_WALLET_ADDRESS in .env.local to enable this check
+      // Optional: Validate address matches expected address (for testing/debugging only)
+      // Set NEXT_PUBLIC_EXPECTED_WALLET_ADDRESS in .env to enable this check
+      // If not set, the app will work with any wallet address (for teammates)
       const expectedAddress = process.env.NEXT_PUBLIC_EXPECTED_WALLET_ADDRESS;
       if (expectedAddress && address) {
         if (address !== expectedAddress) {

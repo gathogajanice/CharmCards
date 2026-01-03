@@ -36,7 +36,7 @@ echo -e "${GREEN}✅ Bitcoin Core is running${NC}"
 echo ""
 
 # Get blockchain info
-BC_INFO=$($BITCOIN_CLI -testnet -datadir="$DATA_DIR" getblockchaininfo 2>&1)
+BC_INFO=$($BITCOIN_CLI -chain=testnet4 -datadir="$DATA_DIR" getblockchaininfo 2>&1)
 BC_EXIT=$?
 
 if [ $BC_EXIT -ne 0 ]; then

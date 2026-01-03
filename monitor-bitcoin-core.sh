@@ -46,7 +46,7 @@ while true; do
         echo -e "${RED}❌ Bitcoin Core is NOT running${NC}"
         echo ""
         echo "Start it with:"
-        echo "  bitcoind -testnet -datadir=$DATA_DIR -daemon"
+        echo "  bitcoind -chain=testnet4 -datadir=$DATA_DIR -daemon"
         echo ""
         sleep $INTERVAL
         continue
@@ -58,7 +58,7 @@ while true; do
     echo ""
     
     # Get blockchain info
-    BC_INFO=$($BITCOIN_CLI -testnet -datadir="$DATA_DIR" getblockchaininfo 2>&1)
+    BC_INFO=$($BITCOIN_CLI -chain=testnet4 -datadir="$DATA_DIR" getblockchaininfo 2>&1)
     BC_EXIT=$?
     
     if [ $BC_EXIT -ne 0 ]; then
@@ -116,7 +116,7 @@ except Exception as e:
 "
     
     # Get network info
-    NET_INFO=$($BITCOIN_CLI -testnet -datadir="$DATA_DIR" getnetworkinfo 2>&1)
+    NET_INFO=$($BITCOIN_CLI -chain=testnet4 -datadir="$DATA_DIR" getnetworkinfo 2>&1)
     if [ $? -eq 0 ]; then
         echo "$NET_INFO" | python3 -c "
 import json
@@ -137,7 +137,7 @@ except:
     fi
     
     # Get mempool info
-    MP_INFO=$($BITCOIN_CLI -testnet -datadir="$DATA_DIR" getmempoolinfo 2>&1)
+    MP_INFO=$($BITCOIN_CLI -chain=testnet4 -datadir="$DATA_DIR" getmempoolinfo 2>&1)
     if [ $? -eq 0 ]; then
         echo "$MP_INFO" | python3 -c "
 import json
