@@ -642,26 +642,27 @@ export class CharmsService {
           const wasmBuffer = await fs.readFile(resolvedAppBin);
           const base64Wasm = wasmBuffer.toString('base64');
           
-          // The Prover API expects binaries keyed by the full app ID path from the spell's apps field
-          // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects key: "n/<app_id>/<app_vk>" (full path)
-          // Error message shows: "app binary not found: n/4ed4ebc5.../5fa3b8ad..." (full path)
-          // Example: apps.$00 = "n/identity/vk" -> binaries["n/identity/vk"] = base64_wasm
+          // The Prover API expects binaries keyed by the app ID from the spell's apps field
+          // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects: "n/<app_id>" (without app_vk)
+          // Example: apps.$00 = "n/identity/vk" -> binaries["n/identity"] = base64_wasm
           if (spellObj.apps && typeof spellObj.apps === 'object') {
             for (const appId of Object.values(spellObj.apps)) {
               const appIdStr = String(appId);
-              // Use the full app ID path as the binary key (n/<app_id>/<app_vk>)
-              // The Prover API error message confirms it expects the full path format
+              // Extract only the APP_ID hex string (no n/ prefix or VK)
+              // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects key: just "<app_id>" (64-char hex)
+              // The error "expected 64 hex characters" confirms the key must be just the hex string
               const parts = appIdStr.split('/');
               if (parts.length >= 3) {
-                // Format: "n/<app_id>/<app_vk>" -> Prover API expects key: "n/<app_id>/<app_vk>" (full path)
-                const binaryKey = appIdStr; // Use the full app ID path
+                // Format: "n/<app_id>/<app_vk>" -> Prover API expects key: just "<app_id>" (64-char hex)
+                // Extract only the APP_ID (parts[1]) - the 64-character hex string
+                const binaryKey = parts[1]; // Just the APP_ID hex string
                 binaries[binaryKey] = base64Wasm;
-                console.log(`✅ Added binary for app: ${binaryKey.substring(0, 60)}...`);
+                console.log(`✅ Added binary for app: ${binaryKey} (extracted from: ${appIdStr.substring(0, 50)}...)`);
               } else if (parts.length === 2) {
-                // Fallback: if format is "n/<app_id>" (missing app_vk), use as-is
-                const binaryKey = appIdStr;
+                // Fallback: if format is "n/<app_id>" (missing app_vk), use parts[1]
+                const binaryKey = parts[1];
                 binaries[binaryKey] = base64Wasm;
-                console.log(`✅ Added binary for app: ${binaryKey.substring(0, 60)}...`);
+                console.log(`✅ Added binary for app: ${binaryKey} (extracted from: ${appIdStr.substring(0, 50)}...)`);
               } else {
                 // Fallback: use full string if format is unexpected
                 console.warn(`⚠️ Unexpected app ID format: ${appIdStr}, using as-is`);
@@ -684,11 +685,12 @@ export class CharmsService {
             const binaryKeys = Object.keys(binaries);
             
             // Check for missing binaries
-            // Use full app ID path for comparison (same logic as binary key generation)
+            // Extract APP_ID hex string for comparison (same logic as binary key generation)
             const missingBinaries = spellAppIds.filter((appId: any) => {
               const appIdStr = String(appId);
-              // Use full app ID path as binary key (n/<app_id>/<app_vk>)
-              const binaryKey = appIdStr;
+              // Extract APP_ID hex string from full format (n/<app_id>/<app_vk>)
+              const parts = appIdStr.split('/');
+              const binaryKey = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : appIdStr);
               return !binaries[binaryKey];
             });
             
@@ -709,11 +711,12 @@ export class CharmsService {
             console.log(`📋 Binary mapping verification:`);
             Object.entries(spellObj.apps).forEach(([key, appId]: [string, any]) => {
               const appIdStr = String(appId);
-              // Use full app ID path as binary key (same logic as when building binaries object)
-              const binaryKey = appIdStr;
+              // Extract binary key (same logic as when building binaries object)
+              const parts = appIdStr.split('/');
+              const binaryKey = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : appIdStr);
               const hasBinary = !!binaries[binaryKey];
               const binaryLength = binaries[binaryKey] ? String(binaries[binaryKey]).length : 0;
-              console.log(`   ${key}: ${appIdStr.substring(0, 60)}... -> binary key: ${binaryKey.substring(0, 60)}... -> ${hasBinary ? `✅ included (${binaryLength} chars)` : '❌ MISSING'}`);
+              console.log(`   ${key}: ${appIdStr.substring(0, 50)}... -> binary key: ${binaryKey} -> ${hasBinary ? `✅ included (${binaryLength} chars)` : '❌ MISSING'}`);
             });
             
             if (missingBinaries.length === 0 && !mockMode) {
@@ -780,17 +783,12 @@ export class CharmsService {
       // Reference: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/
       // Note: API error confirms prev_txs must be enum variant format: [{ "bitcoin": "hex" }, ...]
       // The official docs example shows raw strings, but actual API requires enum variant
-      // CRITICAL: Chain must match the network - testnet4/testnet requires "testnet", mainnet requires "bitcoin"
-      // Mixing testnet UTXOs with mainnet chain parameter causes "app binary not found" errors
-      const bitcoinNetwork = process.env.BITCOIN_NETWORK || 'testnet4';
-      const isTestnet = bitcoinNetwork === 'testnet4' || bitcoinNetwork === 'testnet';
-      const chainParam = isTestnet ? 'testnet' : 'bitcoin';
-      
+      // We only use Bitcoin - "cardano" in error messages is just API indicating it supports both chains
       const payload: any = {
         spell: cleanSpell, // Use cleaned spell object
         binaries: binaries, // Empty object {} when no binary available (per official docs)
         prev_txs: prevTxsArray, // Array of enum variant objects: [{ "bitcoin": "hex_string" }, ...]
-        chain: chainParam, // Must match network: "testnet" for testnet4/testnet, "bitcoin" for mainnet
+        chain: 'bitcoin', // Bitcoin only - we don't use Cardano
         funding_utxo: undefined, // Will be set below
         funding_utxo_value: undefined, // Will be set below
         change_address: undefined, // Will be set below
@@ -809,24 +807,6 @@ export class CharmsService {
       if (fundingUtxoValue === undefined || fundingUtxoValue === null) {
         throw new Error('funding_utxo_value is required by Prover API but was not provided');
       }
-      
-      // CRITICAL: Validate funding_utxo_value is in sats (not BTC or incorrectly multiplied)
-      // Typical UTXO values: 1000-10,000,000 sats (0.00001 - 0.1 BTC)
-      // Values > 1 billion sats (10 BTC) are suspicious and likely errors
-      // Values > 1 trillion sats are definitely wrong (would be > 10,000 BTC)
-      const MAX_REASONABLE_SATS = 1_000_000_000; // 10 BTC - anything above is likely an error
-      if (fundingUtxoValue > MAX_REASONABLE_SATS) {
-        throw new Error(
-          `funding_utxo_value is suspiciously large: ${fundingUtxoValue.toLocaleString()} sats (${(fundingUtxoValue / 100_000_000).toFixed(8)} BTC). ` +
-          `This suggests the value may be in BTC instead of sats, or was multiplied incorrectly. ` +
-          `Expected range: 1,000 - 10,000,000 sats (0.00001 - 0.1 BTC). ` +
-          `Please verify the UTXO value is in sats, not BTC.`
-        );
-      }
-      
-      // Log the value for debugging
-      console.log(`💰 Funding UTXO value: ${fundingUtxoValue.toLocaleString()} sats (${(fundingUtxoValue / 100_000_000).toFixed(8)} BTC)`);
-      
       payload.funding_utxo_value = fundingUtxoValue;
       
       if (!changeAddress) {
@@ -854,27 +834,30 @@ export class CharmsService {
       // Log payload for debugging (without sensitive data)
       console.log('📤 Sending proof request to Prover API...');
       console.log(`   URL: ${this.proverUrl}`);
-      console.log(`   Network: ${bitcoinNetwork} (from BITCOIN_NETWORK env var)`);
-      console.log(`   Chain parameter: ${payload.chain || 'NOT SET'} (must match network: ${isTestnet ? 'testnet' : 'bitcoin'})`);
       console.log(`   Spell version: ${payload.spell?.version || 'NOT SET'}`);
+      console.log(`   Chain: ${payload.chain || 'NOT SET'}`);
       console.log(`   Mock mode: ${mockMode} (using empty binaries object {} per official docs)`);
       
       // Detailed binary logging
       const binaryKeys = Object.keys(payload.binaries || {});
       const spellAppIds = spellObj.apps ? Object.values(spellObj.apps).map((id: any) => String(id)) : [];
-      // Binary keys are the full app ID paths (n/<app_id>/<app_vk>) - same as spell app IDs
-      const binaryKeysFromSpell = spellAppIds; // Use full app ID paths directly
+      // Extract binary keys for logging (same format as what we send to Prover API)
+      const binaryKeysFromSpell = spellAppIds.map((id: string) => {
+        const parts = id.split('/');
+        // Extract only the APP_ID hex string (parts[1]) from "n/<app_id>/<app_vk>"
+        return parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : id);
+      });
       console.log(`   Binaries: ${binaryKeys.length > 0 ? `${binaryKeys.length} entry/entries` : 'empty object {}'}`);
       if (binaryKeys.length > 0) {
-        console.log(`   Binary keys provided: ${binaryKeys.map(k => k.substring(0, 60) + '...').join(', ')}`);
+        console.log(`   Binary keys provided: ${binaryKeys.map(k => k.substring(0, 30) + '...').join(', ')}`);
       }
       if (spellAppIds.length > 0) {
-        console.log(`   Spell app IDs (full format): ${spellAppIds.map(id => id.substring(0, 60) + '...').join(', ')}`);
-        console.log(`   Binary keys required (full paths): ${binaryKeysFromSpell.map(k => k.substring(0, 60) + '...').join(', ')}`);
-        // Check if all app ID paths have binaries
+        console.log(`   Spell app IDs (full format): ${spellAppIds.map(id => id.substring(0, 30) + '...').join(', ')}`);
+        console.log(`   Binary keys required (extracted): ${binaryKeysFromSpell.map(k => k.substring(0, 30) + '...').join(', ')}`);
+        // Check if all extracted binary keys have binaries
         const missing = binaryKeysFromSpell.filter(key => !binaryKeys.includes(key));
         if (missing.length > 0 && !mockMode) {
-          console.error(`   ❌ MISSING binaries for keys: ${missing.map(k => k.substring(0, 60) + '...').join(', ')}`);
+          console.error(`   ❌ MISSING binaries for keys: ${missing.map(k => k.substring(0, 30) + '...').join(', ')}`);
         } else if (missing.length === 0 && !mockMode) {
           console.log(`   ✅ All required binary keys have binaries`);
         }
@@ -1025,17 +1008,8 @@ export class CharmsService {
       if (!payload.spell.version || payload.spell.version !== 8) {
         throw new Error('Payload validation failed: spell.version must be 8');
       }
-      // Validate chain parameter matches network
-      const expectedChain = isTestnet ? 'testnet' : 'bitcoin';
-      if (!payload.chain || (payload.chain !== 'bitcoin' && payload.chain !== 'testnet')) {
-        throw new Error(`Payload validation failed: chain must be "bitcoin" (mainnet) or "testnet" (testnet4/testnet), got: ${payload.chain}`);
-      }
-      if (payload.chain !== expectedChain) {
-        throw new Error(
-          `Payload validation failed: chain parameter "${payload.chain}" does not match network "${bitcoinNetwork}". ` +
-          `Expected: "${expectedChain}". ` +
-          `This mismatch causes "app binary not found" errors because the prover looks for binaries compiled for the wrong network.`
-        );
+      if (!payload.chain || payload.chain !== 'bitcoin') {
+        throw new Error('Payload validation failed: chain must be "bitcoin" at top level');
       }
       if (!payload.spell || typeof payload.spell !== 'object') {
         throw new Error('Payload validation failed: spell must be an object');

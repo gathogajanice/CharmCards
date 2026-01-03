@@ -12,8 +12,7 @@ import type {
   GiftCardNftMetadata,
 } from './types';
 
-// Use relative path for Vercel, fallback to localhost for local dev
-const API_URL = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? '/api' : 'http://localhost:3001');
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 /**
  * Create a mint spell for a new gift card

@@ -96,45 +96,11 @@ export async function validateUTXOExists(utxo: string): Promise<UTXOValidationRe
     }
 
     const output = tx.vout[vout];
-    let value = output.value || 0; // Value from mempool.space API
-    
-    // Ensure value is a number (not string)
-    if (typeof value === 'string') {
-      value = parseFloat(value);
-      if (isNaN(value)) {
-        return {
-          valid: false,
-          error: `Invalid UTXO value format: ${output.value}`,
-        };
-      }
-    }
-    
-    // Mempool.space API returns value in BTC (typically 0.00001 to 0.1 for testnet)
-    // If value > 1, it's likely already in sats (shouldn't happen with mempool.space, but check anyway)
-    // If value < 0.00000001, it's suspiciously small
-    // Convert BTC to sats: multiply by 100,000,000
-    let valueInSats: number;
-    if (value > 1) {
-      // Value is suspiciously large - might already be in sats
-      // Log warning but use as-is (might be a very large UTXO)
-      console.warn(`⚠️ UTXO value is > 1: ${value}. If this is already in sats, conversion will be wrong.`);
-      valueInSats = Math.floor(value);
-    } else {
-      // Normal case: value is in BTC, convert to sats
-      valueInSats = Math.floor(value * 100_000_000);
-    }
-    
-    // Validate the converted value is reasonable (1,000 to 1 billion sats)
-    if (valueInSats < 1_000) {
-      console.warn(`⚠️ UTXO value is very small: ${valueInSats} sats (${value} BTC). This might be below dust threshold.`);
-    }
-    if (valueInSats > 1_000_000_000) {
-      console.error(`❌ UTXO value is suspiciously large: ${valueInSats.toLocaleString()} sats (${value} BTC). This suggests a conversion error.`);
-      return {
-        valid: false,
-        error: `UTXO value is suspiciously large: ${valueInSats.toLocaleString()} sats. This suggests the value may already be in sats or there's a conversion error. Original value: ${value}`,
-      };
-    }
+    const value = output.value || 0; // Value in BTC, convert to sats
+
+    // Check if UTXO is already spent by checking if it appears in any input
+    // For now, we'll assume it's unspent if the transaction is confirmed
+    // A more thorough check would require checking all transactions that spend this output
 
     // Check transaction status
     const status = tx.status;
@@ -154,7 +120,7 @@ export async function validateUTXOExists(utxo: string): Promise<UTXOValidationRe
       utxo: {
         txid: txid!,
         vout: vout!,
-        value: valueInSats, // Value in sats
+        value: Math.floor(value * 100_000_000), // Convert BTC to sats
         status: utxoStatus,
       },
     };
