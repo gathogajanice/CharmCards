@@ -6,7 +6,8 @@ import { useState, useCallback } from 'react';
 import { parseSpell, validateSpell } from '@/lib/charms/spells';
 import type { GiftCardMintParams, Spell } from '@/lib/charms/types';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Use relative path for Vercel, fallback to localhost for local dev
+const API_URL = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? '/api' : 'http://localhost:3001');
 
 export interface UseCharmsReturn {
   mintGiftCard: (params: GiftCardMintParams) => Promise<{ spell: string; proof: any }>;

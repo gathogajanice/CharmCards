@@ -10,7 +10,8 @@ import { hexToPsbtWithWalletUtxos, psbtToHex } from './psbt-converter';
 // For browser wallets, we'll use wallet adapter methods when available
 // import { TransactionSigner } from 'charms-wallet-js';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// Use relative path for Vercel, fallback to localhost for local dev
+const API_URL = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? '/api' : 'http://localhost:3001');
 const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
 
 // Cache for API responses to reduce redundant calls
@@ -136,7 +137,8 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
 
         // Also check if we can get Charm data from API
         try {
-          const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+          // Use relative path for Vercel, fallback to localhost for local dev
+const API_URL = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? '/api' : 'http://localhost:3001');
           // The API might have a way to extract Charms, but for now we'll use localStorage
         } catch (e) {
           // API call failed, continue
@@ -2050,7 +2052,8 @@ export async function getWalletUtxos(
   // Fallback: Use server-side proxy to fetch UTXOs (bypasses CORS)
   // This is a last resort if wallet methods fail
   try {
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    // Use relative path for Vercel, fallback to localhost for local dev
+const API_URL = process.env.NEXT_PUBLIC_API_URL || (typeof window !== 'undefined' ? '/api' : 'http://localhost:3001');
     const proxyUrl = `${API_URL}/api/utxo/${address}`;
     
     console.log('Wallet UTXO methods failed, trying server-side proxy:', proxyUrl);

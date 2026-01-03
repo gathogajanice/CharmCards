@@ -25,6 +25,9 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@/api/*": [
+        "../api/src/*"
       ]
     }
   },
@@ -34,7 +37,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
-    "**/*.mts"
+    "**/*.mts",
+    "../api/src/**/*.ts"
   ],
   "exclude": [
     "node_modules"
