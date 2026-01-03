@@ -81,13 +81,28 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
       // Create redeem spell - decreases balance while keeping NFT
       // Based on redeem-balance.yaml spell template
       // Spell JSON format per: https://docs.charms.dev/references/spell-json/
+      // 
+      // IMPORTANT: tokenId must match the app_id from the original mint
+      // App ID format: "n/<64-char-hex>/<64-char-hex>" where both parts are the same app_id hash
+      // The app_id is generated during mint as SHA256(inUtxo)
+      // tokenId in giftCard should be the app_id (64-char hex string)
+      if (!giftCard.tokenId || giftCard.tokenId.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(giftCard.tokenId)) {
+        throw new Error(
+          `Invalid tokenId format: "${giftCard.tokenId}". ` +
+          `tokenId must be a 64-character hexadecimal string (the app_id from mint). ` +
+          `This should match the app_id generated during the original mint operation.`
+        );
+      }
+      
       const redeemSpell = {
         version: 8, // Protocol version (8 is current Charms protocol version)
         apps: {
           // App identifiers: NFT app ($00) and Token app ($01)
           // Format: "app_type/app_id/app_vk" per Charms Spell JSON reference
-          "$00": `n/${giftCard.tokenId}/${giftCard.tokenId}`, // NFT app
-          "$01": `t/${giftCard.tokenId}/${giftCard.tokenId}`, // Token app
+          // Note: app_vk will be automatically corrected by the API to match the actual WASM binary VK
+          // The API will replace tokenId with the correct app_vk derived from the binary
+          "$00": `n/${giftCard.tokenId}/${giftCard.tokenId}`, // NFT app: n/<app_id>/<app_id> (app_vk will be corrected by API)
+          "$01": `t/${giftCard.tokenId}/${giftCard.tokenId}`, // Token app: t/<app_id>/<app_id> (app_vk will be corrected by API)
         },
         // Input UTXOs containing charms (per Spell JSON reference)
         ins: [
@@ -134,7 +149,27 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
 
       const { proof } = await response.json();
 
-      if (proof.commit_tx && proof.spell_tx) {
+      // Check if Prover API already broadcast transactions
+      // Charms Prover API broadcasts internally as part of /spells/prove
+      // If proof response includes TXIDs and broadcasted flag, skip signing and broadcasting
+      if (proof.broadcasted && proof.commit_txid && proof.spell_txid) {
+        // Prover API already broadcast - use TXIDs from response
+        console.log('✅ Transactions already broadcast by Charms Prover API');
+        console.log(`   Commit TXID: ${proof.commit_txid}`);
+        console.log(`   Spell TXID: ${proof.spell_txid}`);
+        console.log('   Package submission performed internally by Charms Prover API. No separate broadcast step required.');
+        
+        setCommitTxid(proof.commit_txid);
+        setSpellTxid(proof.spell_txid);
+        setTxStatus('confirming');
+        
+        toast.success('✅ Transactions broadcast by Charms Prover API!');
+      } else if (proof.commit_tx && proof.spell_tx) {
+        // Fallback: Prover API didn't broadcast (shouldn't happen, but handle gracefully)
+        console.warn('⚠️ Prover API response missing broadcasted flag or TXIDs');
+        console.warn('   This should not happen with Charms Prover API');
+        console.warn('   Attempting fallback: sign and broadcast');
+        
         setTxStatus('signing');
         toast.info('Please approve the redemption transaction in your wallet...');
 
@@ -158,7 +193,12 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
         setTxStatus('broadcasting');
         const { commitTxid, spellTxid } = await broadcastSpellTransactions(
           signedCommitTx,
-          signedSpellTx
+          signedSpellTx,
+          {
+            alreadyBroadcasted: proof.broadcasted || false,
+            commitTxid: proof.commit_txid,
+            spellTxid: proof.spell_txid,
+          }
         );
 
         setCommitTxid(commitTxid);

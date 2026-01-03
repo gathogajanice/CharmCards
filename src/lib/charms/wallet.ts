@@ -970,6 +970,41 @@ export async function waitForMempoolAcceptance(
 }
 
 /**
+ * Broadcast transaction via mempool.space API
+ * Fallback method when wallet broadcasting fails
+ * Uses POST https://mempool.space/testnet4/api/tx with { "rawtx": "<hex>" }
+ */
+async function broadcastTransactionViaMempoolSpace(signedTxHex: string): Promise<string | null> {
+  try {
+    const mempoolUrl = NETWORK === 'testnet4' 
+      ? 'https://mempool.space/testnet4/api/tx'
+      : 'https://mempool.space/api/tx';
+    
+    console.log('📤 Broadcasting transaction via mempool.space API...');
+    const response = await fetch(mempoolUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ rawtx: signedTxHex.trim() }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn('❌ Mempool.space broadcast failed:', response.status, errorText);
+      return null;
+    }
+
+    const txid = await response.text();
+    console.log('✅ Transaction broadcast via mempool.space, txid:', txid);
+    return txid.trim();
+  } catch (error: any) {
+    console.warn('❌ Mempool.space broadcasting failed:', error.message);
+    return null;
+  }
+}
+
+/**
  * Broadcast transaction using wallet's built-in method
  * According to Charms docs: "Most wallet libraries offer methods for submitting transaction packages"
  * This is more direct and doesn't require third-party services
@@ -984,19 +1019,11 @@ async function broadcastTransactionViaWallet(signedTxHex: string): Promise<strin
     if ((window as any).unisat) {
       const unisat = (window as any).unisat;
       
-      // Try pushTx method (most common)
+      // Try pushTx method (most common) - UniSat expects { rawtx: hex } format
       if (typeof unisat.pushTx === 'function') {
         console.log('📤 Broadcasting transaction via Unisat pushTx...');
-        const txid = await unisat.pushTx(signedTxHex.trim());
+        const txid = await unisat.pushTx({ rawtx: signedTxHex.trim() });
         console.log('✅ Transaction broadcast via Unisat pushTx, txid:', txid);
-        return typeof txid === 'string' ? txid.trim() : String(txid).trim();
-      }
-      
-      // Try sendRawTransaction as alternative
-      if (typeof unisat.sendRawTransaction === 'function') {
-        console.log('📤 Broadcasting transaction via Unisat sendRawTransaction...');
-        const txid = await unisat.sendRawTransaction(signedTxHex.trim());
-        console.log('✅ Transaction broadcast via Unisat sendRawTransaction, txid:', txid);
         return typeof txid === 'string' ? txid.trim() : String(txid).trim();
       }
     }
@@ -1065,8 +1092,17 @@ export async function broadcastTransaction(signedTxHex: string): Promise<string>
       return walletTxid;
     }
 
-    // Step 2: Fallback to server-side proxy if wallet method unavailable
-    console.log('⚠️ Wallet broadcasting not available, falling back to server-side proxy...');
+    // Step 2: Fallback to mempool.space API if wallet method unavailable
+    console.log('⚠️ Wallet broadcasting not available, trying mempool.space API...');
+    const mempoolTxid = await broadcastTransactionViaMempoolSpace(signedTxHex);
+    
+    if (mempoolTxid) {
+      console.log('✅ Transaction broadcast successfully via mempool.space, txid:', mempoolTxid);
+      return mempoolTxid;
+    }
+
+    // Step 3: Fallback to server-side proxy if wallet and mempool.space methods unavailable
+    console.log('⚠️ Wallet and mempool.space broadcasting not available, falling back to server-side proxy...');
     const broadcastUrl = `${API_URL}/api/broadcast/tx`;
     
     console.log('Broadcasting transaction via server proxy:', broadcastUrl);
@@ -1116,9 +1152,33 @@ export async function broadcastTransaction(signedTxHex: string): Promise<string>
  */
 export async function broadcastSpellTransactions(
   commitTxHex: string,
-  spellTxHex: string
+  spellTxHex: string,
+  options?: {
+    alreadyBroadcasted?: boolean;
+    commitTxid?: string;
+    spellTxid?: string;
+  }
 ): Promise<{ commitTxid: string; spellTxid: string }> {
   try {
+    // Check if transactions are already broadcast by Prover API
+    // Charms Prover API broadcasts internally as part of /spells/prove
+    // If alreadyBroadcasted is true, skip all local broadcast attempts
+    if (options?.alreadyBroadcasted && options?.commitTxid && options?.spellTxid) {
+      console.log('✅ Transactions already broadcast by Charms Prover API');
+      console.log(`   Commit TXID: ${options.commitTxid}`);
+      console.log(`   Spell TXID: ${options.spellTxid}`);
+      console.log('   Package submission performed internally by Charms Prover API. No separate broadcast step required.');
+      return {
+        commitTxid: options.commitTxid,
+        spellTxid: options.spellTxid,
+      };
+    }
+    
+    // Guard: If alreadyBroadcasted is true but TXIDs missing, this is an error
+    if (options?.alreadyBroadcasted) {
+      throw new Error('Transactions marked as already broadcast but TXIDs are missing. This should not happen with Prover API.');
+    }
+    
     // Step 1: Validate both transactions before broadcasting
     // Per Charms docs: "It is a good idea to validate the transactions before submitting them"
     console.log('🔍 Validating commit transaction...');
@@ -1161,7 +1221,7 @@ export async function broadcastSpellTransactions(
         console.log(`✅ Commit transaction ${commitTxid} confirmed in mempool - safe to broadcast spell transaction`);
       }
       
-      // Try wallet method for spell transaction
+      // Try wallet method for spell transaction (will fallback to mempool.space → server via broadcastTransaction)
       const walletSpellTxid = await broadcastTransactionViaWallet(spellTxHex);
       
       if (walletSpellTxid) {
@@ -1169,59 +1229,140 @@ export async function broadcastSpellTransactions(
         console.log(`✅ Spell transaction broadcast via wallet: ${spellTxid}`);
         console.log(`✅ Package broadcast successful via wallet: commit=${commitTxid}, spell=${spellTxid}`);
       } else {
-        // Commit was broadcast via wallet, but spell needs server fallback
-        console.log('⚠️ Spell transaction wallet broadcast not available, using server proxy...');
+        // Commit was broadcast via wallet, but spell needs fallback (mempool.space → server)
+        // broadcastTransaction already has the fallback chain: wallet → mempool.space → server
+        console.log('⚠️ Spell transaction wallet broadcast not available, trying fallback chain...');
         spellTxid = await broadcastTransaction(spellTxHex);
-        console.log(`✅ Package broadcast (mixed): commit=${commitTxid} (wallet), spell=${spellTxid} (server)`);
+        console.log(`✅ Package broadcast (mixed): commit=${commitTxid} (wallet), spell=${spellTxid}`);
       }
     } else {
-      // Wallet method not available, use server-side proxy for package broadcasting
-      console.log('⚠️ Wallet broadcasting not available, using server-side proxy for package...');
-      const packageUrl = `${API_URL}/api/broadcast/package`;
+      // Wallet method not available for commit, try mempool.space fallback
+      console.log('⚠️ Commit transaction wallet broadcast not available, trying mempool.space...');
+      const mempoolCommitTxid = await broadcastTransactionViaMempoolSpace(commitTxHex);
       
-      const response = await fetch(packageUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          commitTx: commitTxHex.trim(),
-          spellTx: spellTxHex.trim(),
-        }),
-      });
-
-      if (!response.ok) {
-        let errorMessage: string;
-        let errorDetails: any = null;
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.error || errorData.message || `Package broadcast failed with status ${response.status}`;
-          errorDetails = errorData;
-          console.error('Package broadcast failed - Full error response:', errorData);
-        } catch {
-          const errorText = await response.text();
-          errorMessage = errorText || `Package broadcast failed with status ${response.status}`;
-          console.error('Package broadcast failed - Error text:', errorText);
-        }
-        console.error('Package broadcast failed:', response.status, errorMessage);
-        console.error('Error details:', errorDetails);
+      if (mempoolCommitTxid) {
+        commitTxid = mempoolCommitTxid;
+        console.log(`✅ Commit transaction broadcast via mempool.space: ${commitTxid}`);
         
-        // Include error details in the error message for better debugging
-        const fullErrorMessage = errorDetails 
-          ? `Failed to broadcast transaction package: ${errorMessage} (Status: ${response.status}, Type: ${errorDetails.errorType || 'unknown'}, Code: ${errorDetails.errorCode || 'none'})`
-          : `Failed to broadcast transaction package: ${errorMessage}`;
-        throw new Error(fullErrorMessage);
+        // Wait for commit transaction to be accepted into mempool
+        console.log('⏳ Waiting for commit transaction to be accepted into mempool...');
+        const commitAccepted = await waitForMempoolAcceptance(commitTxid, 30000, 1000);
+        
+        if (!commitAccepted) {
+          console.warn(`⚠️ Warning: Commit transaction ${commitTxid} was not accepted into mempool within timeout`);
+          console.warn('⚠️ Proceeding with spell broadcast anyway - it may fail if commit is not in mempool');
+        } else {
+          console.log(`✅ Commit transaction ${commitTxid} confirmed in mempool - safe to broadcast spell transaction`);
+        }
+        
+        // Broadcast spell transaction using fallback chain (wallet → mempool.space → server)
+        spellTxid = await broadcastTransaction(spellTxHex);
+        console.log(`✅ Package broadcast (mixed): commit=${commitTxid} (mempool.space), spell=${spellTxid}`);
+      } else {
+        // Wallet and mempool.space methods not available, use server-side proxy for package broadcasting
+        console.log('⚠️ Wallet and mempool.space broadcasting not available, using server-side proxy for package...');
+        
+        // Validate UTXO from commit transaction before broadcasting
+        // Extract input UTXO from commit transaction to check if it's from a pruned block
+        try {
+          const bitcoin = await import('bitcoinjs-lib');
+          const network = (process.env.NEXT_PUBLIC_BITCOIN_NETWORK === 'testnet4' || process.env.NEXT_PUBLIC_BITCOIN_NETWORK === 'testnet')
+            ? { messagePrefix: '\x18Bitcoin Signed Message:\n', bech32: 'tb', bip32: { public: 0x043587cf, private: 0x04358394 }, pubKeyHash: 0x6f, scriptHash: 0xc4, wif: 0xef }
+            : bitcoin.networks.bitcoin;
+          
+          const commitTx = bitcoin.Transaction.fromHex(commitTxHex);
+          if (commitTx.ins.length > 0) {
+            const input = commitTx.ins[0];
+            const hashBuffer = Buffer.from(input.hash);
+            const txid = hashBuffer.reverse().toString('hex');
+            const vout = input.index;
+            const inputUtxo = `${txid}:${vout}`;
+            
+            console.log(`🔍 Validating input UTXO ${inputUtxo} before broadcasting...`);
+            
+            // Check if node is pruned and validate UTXO
+            const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
+            const MEMEPOOL_BASE_URL = NETWORK === 'testnet4'
+              ? 'https://memepool.space/testnet4'
+              : 'https://memepool.space';
+            
+            // Get prune height from health endpoint
+            const healthUrl = `${API_URL}/api/broadcast/health`;
+            const healthResponse = await fetch(healthUrl, { cache: 'no-store' });
+            if (healthResponse.ok) {
+              const healthData = await healthResponse.json();
+              const pruneHeight = healthData?.blockchain?.pruneHeight;
+              
+              if (pruneHeight) {
+                // Check UTXO block height
+                const txUrl = `${MEMEPOOL_BASE_URL}/api/tx/${txid}`;
+                const txResponse = await fetch(txUrl, { signal: AbortSignal.timeout(5000) });
+                
+                if (txResponse.ok) {
+                  const txData = await txResponse.json();
+                  const blockHeight = txData?.status?.block_height;
+                  
+                  if (blockHeight !== undefined && blockHeight <= pruneHeight) {
+                    throw new Error(`Cannot broadcast: UTXO ${inputUtxo} is from block ${blockHeight.toLocaleString()}, which is before the prune height (${pruneHeight.toLocaleString()}).\n\nThe node is PRUNED and only keeps blocks after ${pruneHeight.toLocaleString()}. It cannot verify UTXOs from older blocks.\n\nSOLUTION: Get a fresh UTXO from the faucet. New coins will be from recent blocks (after ${pruneHeight.toLocaleString()}) and will work with your pruned node.`);
+                  }
+                }
+              }
+            }
+          }
+        } catch (validationError: any) {
+          if (validationError.message?.includes('Cannot broadcast')) {
+            throw validationError; // Re-throw prune errors
+          }
+          console.warn(`⚠️ Could not validate UTXO before broadcast: ${validationError.message}`);
+          // Continue anyway - the pre-transaction validation should have caught it
+        }
+        
+        const packageUrl = `${API_URL}/api/broadcast/package`;
+        
+        const response = await fetch(packageUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            commitTx: commitTxHex.trim(),
+            spellTx: spellTxHex.trim(),
+          }),
+        });
+
+        if (!response.ok) {
+          let errorMessage: string;
+          let errorDetails: any = null;
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error || errorData.message || `Package broadcast failed with status ${response.status}`;
+            errorDetails = errorData;
+            console.error('Package broadcast failed - Full error response:', errorData);
+          } catch {
+            const errorText = await response.text();
+            errorMessage = errorText || `Package broadcast failed with status ${response.status}`;
+            console.error('Package broadcast failed - Error text:', errorText);
+          }
+          console.error('Package broadcast failed:', response.status, errorMessage);
+          console.error('Error details:', errorDetails);
+          
+          // Include error details in the error message for better debugging
+          const fullErrorMessage = errorDetails 
+            ? `Failed to broadcast transaction package: ${errorMessage} (Status: ${response.status}, Type: ${errorDetails.errorType || 'unknown'}, Code: ${errorDetails.errorCode || 'none'})`
+            : `Failed to broadcast transaction package: ${errorMessage}`;
+          throw new Error(fullErrorMessage);
+        }
+
+        const result = await response.json();
+        commitTxid = result.commitTxid;
+        spellTxid = result.spellTxid;
+
+        if (!commitTxid || !spellTxid) {
+          throw new Error('Invalid response from package broadcast endpoint');
+        }
+
+        console.log(`✅ Package broadcast successful via server proxy: commit=${commitTxid}, spell=${spellTxid}`);
       }
-
-      const result = await response.json();
-      commitTxid = result.commitTxid;
-      spellTxid = result.spellTxid;
-
-      if (!commitTxid || !spellTxid) {
-        throw new Error('Invalid response from package broadcast endpoint');
-      }
-
-      console.log(`✅ Package broadcast successful via server proxy: commit=${commitTxid}, spell=${spellTxid}`);
     }
 
     // Step 3: Verify both transactions are in mempool (optional but recommended)
@@ -1555,10 +1696,12 @@ export async function getWalletBalance(
 export async function filterSyncedUtxos(
   utxos: Array<{ txid: string; vout: number; value: number }>,
   expectedAddress?: string,
-  nodeBlocks?: number
+  nodeBlocks?: number,
+  pruneHeight?: number
 ): Promise<{
-  syncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number }>;
+  syncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; parentPruned?: boolean }>;
   unsyncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; blocksNeeded?: number }>;
+  prunedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; parentPruned?: boolean }>;
   unconfirmedUtxos: Array<{ txid: string; vout: number; value: number }>;
 }> {
   const NETWORK = process.env.NEXT_PUBLIC_BITCOIN_NETWORK || 'testnet4';
@@ -1566,12 +1709,19 @@ export async function filterSyncedUtxos(
     ? 'https://memepool.space/testnet4'
     : 'https://memepool.space';
 
-  const syncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number }> = [];
+  const syncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; parentPruned?: boolean }> = [];
   const unsyncedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; blocksNeeded?: number }> = [];
+  const prunedUtxos: Array<{ txid: string; vout: number; value: number; blockHeight?: number; parentPruned?: boolean }> = [];
   const unconfirmedUtxos: Array<{ txid: string; vout: number; value: number }> = [];
 
   // If no node blocks info, assume all are usable (will be checked later)
   const hasNodeInfo = nodeBlocks !== undefined && nodeBlocks > 0;
+  const isPruned = pruneHeight !== undefined && pruneHeight > 0;
+  
+  console.log(`🔍 filterSyncedUtxos: Checking ${utxos.length} UTXOs`);
+  console.log(`   Node blocks: ${nodeBlocks?.toLocaleString() || 'unknown'}`);
+  console.log(`   Prune height: ${pruneHeight?.toLocaleString() || 'not pruned'}`);
+  console.log(`   Is pruned: ${isPruned}`);
 
   for (const utxo of utxos) {
     try {
@@ -1587,36 +1737,141 @@ export async function filterSyncedUtxos(
         
         if (blockHeight !== undefined) {
           // Transaction is confirmed
-          if (hasNodeInfo && nodeBlocks! >= blockHeight) {
-            // Node has synced this block
-            syncedUtxos.push({ ...utxo, blockHeight });
+          
+          // Check if UTXO transaction itself is from a pruned block
+          const utxoIsPruned = isPruned && blockHeight <= pruneHeight!;
+          
+          // Check parent transactions (inputs) - Bitcoin Core needs to verify the entire chain
+          // If any input's parent transaction is from a pruned block, the UTXO can't be verified
+          let parentPruned = false;
+          let parentBlockHeight: number | null = null;
+          let parentCheckFailed = false;
+          
+          if (isPruned && txData.vin && txData.vin.length > 0) {
+            // Check ALL parent transactions, not just the first one
+            // If ANY parent is from a pruned block, the UTXO can't be verified
+            // Check parents sequentially to avoid rate limiting, but stop at first pruned parent
+            for (const input of txData.vin) {
+              if (input.txid && !parentPruned) {
+                try {
+                  const parentTxUrl = `${MEMEPOOL_BASE_URL}/api/tx/${input.txid}`;
+                  const parentResponse = await fetch(parentTxUrl, { 
+                    signal: AbortSignal.timeout(3000) // Shorter timeout for parent check
+                  });
+                  
+                  if (parentResponse.ok) {
+                    const parentTxData = await parentResponse.json();
+                    const pHeight = parentTxData?.status?.block_height ?? null;
+                    
+                    if (pHeight !== null && pHeight !== undefined && pHeight <= pruneHeight!) {
+                      parentPruned = true;
+                      parentBlockHeight = pHeight;
+                      console.warn(`UTXO ${utxo.txid}:${utxo.vout}: Parent transaction ${input.txid} is from block ${pHeight}, which is before prune height ${pruneHeight}. Cannot be verified.`);
+                      break; // Found pruned parent, no need to check others
+                    } else if (pHeight !== null && pHeight !== undefined) {
+                      // Track the first valid parent height for logging
+                      if (parentBlockHeight === null) {
+                        parentBlockHeight = pHeight;
+                      }
+                    }
+                  } else {
+                    // If we can't fetch parent and node is pruned, be conservative
+                    // Mark as potentially pruned if we can't verify
+                    console.warn(`Could not fetch parent transaction ${input.txid} for UTXO ${utxo.txid}:${utxo.vout} - cannot verify if pruned`);
+                    parentCheckFailed = true;
+                    // Continue checking other parents, but mark as failed
+                  }
+                } catch (parentError: any) {
+                  console.warn(`Error checking parent transaction ${input.txid} for UTXO ${utxo.txid}:${utxo.vout}: ${parentError.message}`);
+                  parentCheckFailed = true;
+                  // Continue checking other parents
+                }
+              }
+            }
+            
+            // If we couldn't verify all parents and node is pruned, be conservative
+            // Reject UTXO if we can't verify parents (safer than allowing potentially pruned UTXO)
+            if (parentCheckFailed && !parentPruned && isPruned) {
+              console.warn(`UTXO ${utxo.txid}:${utxo.vout}: Could not verify all parent transactions. Rejecting as potentially pruned (node is pruned, cannot risk using unverified UTXO).`);
+              parentPruned = true; // Mark as pruned to be safe
+            }
+          }
+          
+          // First check if UTXO is from a pruned block OR if parent is pruned
+          if (utxoIsPruned || parentPruned) {
+            // UTXO or its parent is from a pruned block - cannot be verified by pruned node
+            prunedUtxos.push({ ...utxo, blockHeight, parentPruned });
+            const reason = utxoIsPruned 
+              ? `UTXO transaction is from block ${blockHeight}, which is before prune height ${pruneHeight}`
+              : `Parent transaction is from block ${parentBlockHeight || 'unknown'}, which is before prune height ${pruneHeight}`;
+            console.warn(`UTXO ${utxo.txid}:${utxo.vout}: ${reason}. Cannot be verified by pruned node.`);
+          } else if (hasNodeInfo && nodeBlocks! >= blockHeight) {
+            // Node has synced this block and it's not pruned - safe to use
+            syncedUtxos.push({ ...utxo, blockHeight, parentPruned: false });
           } else if (hasNodeInfo) {
-            // Node hasn't synced this block yet
+            // Node hasn't synced this block yet - will fail if used
+            const blocksNeeded = blockHeight - nodeBlocks!;
             unsyncedUtxos.push({ 
               ...utxo, 
               blockHeight, 
-              blocksNeeded: blockHeight - nodeBlocks! 
+              blocksNeeded
             });
+            console.warn(`UTXO ${utxo.txid}:${utxo.vout} is from block ${blockHeight}, but node is at ${nodeBlocks} (needs ${blocksNeeded} more blocks)`);
           } else {
-            // No node info, assume it's usable
-            syncedUtxos.push({ ...utxo, blockHeight });
+            // No node info available - assume it's usable but log warning
+            // But still check prune height if available
+            if (utxoIsPruned || parentPruned) {
+              prunedUtxos.push({ ...utxo, blockHeight, parentPruned });
+              const reason = utxoIsPruned 
+                ? `UTXO transaction is from block ${blockHeight}, which is before prune height ${pruneHeight}`
+                : `Parent transaction is from block ${parentBlockHeight}, which is before prune height ${pruneHeight}`;
+              console.warn(`UTXO ${utxo.txid}:${utxo.vout}: ${reason}. Cannot be verified by pruned node.`);
+            } else {
+              syncedUtxos.push({ ...utxo, blockHeight, parentPruned: false });
+              console.warn(`No node block info available - assuming UTXO ${utxo.txid}:${utxo.vout} from block ${blockHeight} is usable`);
+            }
           }
         } else {
           // Transaction is unconfirmed
-          unconfirmedUtxos.push(utxo);
+          // If node is pruned, be more conservative with unconfirmed UTXOs
+          // They might have pruned parents that we can't verify
+          if (isPruned) {
+            console.warn(`UTXO ${utxo.txid}:${utxo.vout}: Transaction is unconfirmed. Node is pruned - cannot verify if parent is pruned. Being conservative and marking as potentially unusable.`);
+            // For pruned nodes, we can't verify unconfirmed UTXOs have non-pruned parents
+            // So we'll mark them separately - they can be used but with warning
+            // The caller should prefer synced UTXOs over unconfirmed when pruned
+            unconfirmedUtxos.push(utxo);
+          } else {
+            // Node is not pruned - unconfirmed UTXOs are fine
+            unconfirmedUtxos.push(utxo);
+          }
         }
       } else {
-        // Transaction not found or error - assume unconfirmed
-        unconfirmedUtxos.push(utxo);
+        // Transaction not found or error
+        // If node is pruned, be conservative - might be from pruned block
+        if (isPruned) {
+          console.warn(`UTXO ${utxo.txid}:${utxo.vout}: Could not fetch transaction data. Node is pruned - cannot verify if from pruned block. Being conservative.`);
+          // Mark as potentially pruned if we can't verify
+          prunedUtxos.push({ ...utxo, blockHeight: undefined, parentPruned: true });
+        } else {
+          // Node not pruned - assume unconfirmed
+          unconfirmedUtxos.push(utxo);
+        }
       }
     } catch (error: any) {
-      // If we can't check, assume it's unconfirmed (safer to include)
-      console.warn(`Could not check block height for UTXO ${utxo.txid}:${utxo.vout}:`, error.message);
-      unconfirmedUtxos.push(utxo);
+      // If we can't check and node is pruned, be conservative
+      if (isPruned) {
+        console.warn(`Could not check UTXO ${utxo.txid}:${utxo.vout}: ${error.message}. Node is pruned - marking as potentially pruned to be safe.`);
+        prunedUtxos.push({ ...utxo, blockHeight: undefined, parentPruned: true });
+      } else {
+        // Node not pruned - assume unconfirmed
+        console.warn(`Could not check block height for UTXO ${utxo.txid}:${utxo.vout}:`, error.message);
+        unconfirmedUtxos.push(utxo);
+      }
     }
   }
 
-  return { syncedUtxos, unsyncedUtxos, unconfirmedUtxos };
+  return { syncedUtxos, unsyncedUtxos, prunedUtxos, unconfirmedUtxos };
 }
 
 export async function getWalletUtxos(
