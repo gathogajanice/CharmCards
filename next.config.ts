@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
   images: {
@@ -18,6 +19,16 @@ const nextConfig: NextConfig = {
   },
   eslint: {
     ignoreDuringBuilds: true,
+  },
+  webpack: (config) => {
+    // Use empty stub for async-storage (React Native only, not needed for web)
+    // This prevents build warnings from @metamask/sdk trying to import React Native modules
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@react-native-async-storage/async-storage': path.resolve(__dirname, 'src/lib/async-storage-stub.ts'),
+    };
+    
+    return config;
   },
   // Note: Turbopack handles dependencies differently than webpack
   // Optional wallet dependencies should be installed if needed
