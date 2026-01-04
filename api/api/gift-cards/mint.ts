@@ -68,10 +68,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // Validate UTXO format
-    const utxoValidation = validateUTXOFormat(inUtxo);
-    if (!utxoValidation.valid) {
+    const utxoFormatCheck = validateUTXOFormat(inUtxo);
+    if (!utxoFormatCheck.valid) {
       return res.status(400).json({
-        error: `Invalid UTXO format: ${utxoValidation.error}`,
+        error: `Invalid UTXO format: ${utxoFormatCheck.error}`,
       });
     }
 
