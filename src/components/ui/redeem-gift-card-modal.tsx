@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { ShoppingBag, Loader, DollarSign } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppKitAccount } from '@reown/appkit/react';
-import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions } from '@/lib/charms/wallet';
+import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions, findFundingUtxo } from '@/lib/charms/wallet';
 import TransactionStatus, { TransactionStatus as TxStatus } from '@/components/ui/transaction-status';
 import type { GiftCardNftMetadata } from '@/lib/charms/types';
 import { useTransactionPolling } from '@/hooks/use-wallet-data';
@@ -49,6 +49,13 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
   const redeemAmountNum = parseFloat(redeemAmount) || 0;
   const remainingBalance = maxAmount - redeemAmountNum;
 
+  // Auto-set redeem amount to full balance when modal opens (default, but partial redeems are supported)
+  useEffect(() => {
+    if (isOpen && maxAmount > 0) {
+      setRedeemAmount(maxAmount.toFixed(2));
+    }
+  }, [isOpen, maxAmount]);
+
   const handleRedeem = async () => {
     if (!redeemAmount || redeemAmountNum <= 0) {
       toast.error('Please enter a valid redemption amount');
@@ -78,14 +85,35 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
         throw new Error('No UTXOs available');
       }
 
-      // Create redeem spell - decreases balance while keeping NFT
-      // Based on redeem-balance.yaml spell template
-      // Spell JSON format per: https://docs.charms.dev/references/spell-json/
-      // 
-      // IMPORTANT: tokenId must match the app_id from the original mint
-      // App ID format: "n/<64-char-hex>/<64-char-hex>" where both parts are the same app_id hash
-      // The app_id is generated during mint as SHA256(inUtxo)
-      // tokenId in giftCard should be the app_id (64-char hex string)
+      // Extract NFT UTXO ID to exclude it from funding UTXO search
+      const nftUtxoId = giftCard.utxoId || (utxos[0] ? `${utxos[0].txid}:${utxos[0].vout}` : null);
+      
+      // Find a plain Bitcoin UTXO for funding (exclude the NFT UTXO)
+      setTxStatus('creating-spell');
+      const fundingUtxo = await findFundingUtxo(address, nftUtxoId ? [nftUtxoId] : []);
+      
+      if (!fundingUtxo) {
+        throw new Error(
+          'No plain Bitcoin UTXO available for funding. ' +
+          'Please fund your wallet with some Bitcoin (not charms) to pay for transaction fees. ' +
+          'You need at least 1000 satoshis for fees.'
+        );
+      }
+      
+      console.log(`✅ Found funding UTXO: ${fundingUtxo.txid}:${fundingUtxo.vout} (${fundingUtxo.value} sats)`);
+
+      // Get exact on-chain token amount from NFT metadata
+      // remaining_balance is stored in cents and represents the exact on-chain amount
+      const exactInputTokenAmount = giftCard.nftMetadata?.remaining_balance;
+      
+      if (!exactInputTokenAmount || exactInputTokenAmount <= 0) {
+        throw new Error(
+          'Invalid on-chain token balance. The gift card has no remaining balance. ' +
+          'Please check the gift card status or try refreshing your wallet.'
+        );
+      }
+      
+      // Validate tokenId format
       if (!giftCard.tokenId || giftCard.tokenId.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(giftCard.tokenId)) {
         throw new Error(
           `Invalid tokenId format: "${giftCard.tokenId}". ` +
@@ -94,6 +122,40 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
         );
       }
       
+      // Calculate redeem amount in cents
+      const redeemAmountCents = Math.floor(redeemAmountNum * 100);
+      
+      // Validate redeem amount is within bounds
+      if (redeemAmountCents <= 0) {
+        throw new Error('Redeem amount must be greater than 0');
+      }
+      
+      if (redeemAmountCents > exactInputTokenAmount) {
+        throw new Error(
+          `Cannot redeem more than available balance. ` +
+          `On-chain balance: $${(exactInputTokenAmount / 100).toFixed(2)}, ` +
+          `Requested: $${redeemAmountNum.toFixed(2)}.`
+        );
+      }
+      
+      console.log(`📊 Token amounts: Input=${exactInputTokenAmount} cents, Redeem=${redeemAmountCents} cents`);
+      console.log(`   Partial redeem supported: NFT will be consumed, ${redeemAmountCents} cents will be output`);
+      
+      // Validate input token amount matches NFT remaining balance
+      if (exactInputTokenAmount !== giftCard.nftMetadata.remaining_balance) {
+        throw new Error(
+          `Token amount mismatch: Input token amount (${exactInputTokenAmount}) ` +
+          `does not match NFT remaining_balance (${giftCard.nftMetadata.remaining_balance}). ` +
+          `This will cause contract validation to fail.`
+        );
+      }
+      
+      // Create redeem spell - burn-only: consume NFT, output only redeemed tokens
+      // Based on burn-only redeem pattern
+      // Spell JSON format per: https://docs.charms.dev/references/spell-json/
+      // 
+      // IMPORTANT: Use exact on-chain amounts to prevent WASM validation failures
+      // Contract validates: output_token_amount > 0 and output_token_amount <= input_nft.remaining_balance
       const redeemSpell = {
         version: 8, // Protocol version (8 is current Charms protocol version)
         apps: {
@@ -104,46 +166,61 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
           "$00": `n/${giftCard.tokenId}/${giftCard.tokenId}`, // NFT app: n/<app_id>/<app_id> (app_vk will be corrected by API)
           "$01": `t/${giftCard.tokenId}/${giftCard.tokenId}`, // Token app: t/<app_id>/<app_id> (app_vk will be corrected by API)
         },
+        // Omit public_inputs - contract expects empty Data (assert_eq!(x, &empty))
         // Input UTXOs containing charms (per Spell JSON reference)
         ins: [
           {
             utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`, // Format: "txid:vout"
             charms: {
-              "$00": giftCard.nftMetadata, // NFT metadata
-              "$01": Math.floor(giftCard.balance * 100), // Current token balance in cents
+              "$00": giftCard.nftMetadata, // NFT metadata (will be consumed/burned)
+              "$01": exactInputTokenAmount, // EXACT on-chain token amount in cents (not from UI state)
             },
           },
         ],
         // Output destinations for charms (per Spell JSON reference)
+        // Redeem: NO NFT output, only token output for redeemed amount
+        // Contract validates: output_token_amount > 0 and output_token_amount <= input_nft.remaining_balance
         outs: [
           {
-            address: address, // Keep NFT in same wallet (Taproot address)
+            address: address, // Output to same wallet (Taproot address)
             charms: {
-              "$00": {
-                // NFT with updated remaining balance
-                ...giftCard.nftMetadata,
-                remaining_balance: Math.floor(remainingBalance * 100), // Updated balance in cents
-              },
-              "$01": Math.floor(remainingBalance * 100), // Remaining token balance in cents
+              // "$00" (NFT) is omitted - NFT is consumed, not recreated
+              "$01": redeemAmountCents, // Output redeemed amount (partial redeems supported)
             },
             sats: 1000, // Required: Bitcoin output value in satoshis
           },
         ],
       };
+      
+      // Verify spell matches contract requirements for redeem
+      console.log('🔍 Redeem spell validation:');
+      console.log(`   Input NFT remaining_balance: ${giftCard.nftMetadata.remaining_balance}`);
+      console.log(`   Input token amount: ${exactInputTokenAmount}`);
+      console.log(`   Match: ${exactInputTokenAmount === giftCard.nftMetadata.remaining_balance ? '✅' : '❌'}`);
+      console.log(`   Redeemed amount: ${redeemAmountCents} cents`);
+      console.log(`   Output token amount: ${redeemAmountCents} (redeemed value)`);
+      console.log(`   NFT output: ❌ (NFT consumed, not recreated)`);
+      console.log(`   Redeemed amount > 0: ${redeemAmountCents > 0 ? '✅' : '❌'}`);
+      console.log(`   Redeemed amount <= input balance: ${redeemAmountCents <= exactInputTokenAmount ? '✅' : '❌'}`);
 
       // Call API to generate proof
       setTxStatus('generating-proof');
       const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      
       const response = await fetch(`${API_URL}/api/gift-cards/redeem`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           spell: redeemSpell,
+          fundingUtxo: `${fundingUtxo.txid}:${fundingUtxo.vout}`,
+          fundingUtxoValue: fundingUtxo.value, // EXACT value in satoshis from wallet
+          changeAddress: address,
         }),
       });
 
       if (!response.ok) {
         const errorData = await response.json();
+        
         throw new Error(errorData.error || 'Failed to generate redemption proof');
       }
 
@@ -254,7 +331,7 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
             Redeem Gift Card
           </DialogTitle>
           <DialogDescription className="text-[13px] text-black/60">
-            Spend part of your {giftCard.brand} gift card balance. The NFT will remain in your wallet with the updated balance.
+            Redeem part or all of your {giftCard.brand} gift card balance. The NFT will be consumed and the redeemed amount will be sent to your wallet.
           </DialogDescription>
         </DialogHeader>
 
@@ -285,36 +362,46 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
                 min="0.01"
                 max={maxAmount}
                 step="0.01"
-                placeholder="0.00"
+                placeholder={maxAmount.toFixed(2)}
                 value={redeemAmount}
-                onChange={(e) => setRedeemAmount(e.target.value)}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value) || 0;
+                  if (val >= 0 && val <= maxAmount) {
+                    setRedeemAmount(e.target.value);
+                  } else if (val > maxAmount) {
+                    setRedeemAmount(maxAmount.toFixed(2));
+                  }
+                }}
                 className="pl-8 font-semibold"
                 disabled={isRedeeming}
               />
             </div>
             <div className="flex items-center justify-between text-[11px] text-black/50">
-              <span>Max: ${maxAmount.toFixed(2)}</span>
-              <button
-                onClick={() => setRedeemAmount(maxAmount.toFixed(2))}
-                className="text-[#2A9DFF] hover:underline font-medium"
-                disabled={isRedeeming}
-              >
-                Use Max
-              </button>
+              <span className="text-black/40">Max: ${maxAmount.toFixed(2)}</span>
             </div>
           </div>
 
-          {/* Balance Preview */}
+          {/* Balance Preview - Simplified */}
           {redeemAmountNum > 0 && (
-            <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg">
-              <div className="flex items-center justify-between text-[12px] mb-1">
-                <span className="text-black/60">Redeeming:</span>
-                <span className="font-semibold text-black">${redeemAmountNum.toFixed(2)}</span>
+            <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+              <div className="flex items-center justify-between text-[13px]">
+                <span className="text-black/70 font-medium">Redeeming:</span>
+                <span className="font-bold text-black">${redeemAmountNum.toFixed(2)}</span>
               </div>
-              <div className="flex items-center justify-between text-[12px]">
-                <span className="text-black/60">Remaining Balance:</span>
-                <span className="font-semibold text-black">${remainingBalance.toFixed(2)}</span>
-              </div>
+              {redeemAmountNum < maxAmount && (
+                <div className="mt-2 pt-2 border-t border-orange-200">
+                  <span className="text-[11px] text-orange-700">
+                    ⚠️ Remaining ${(maxAmount - redeemAmountNum).toFixed(2)} will be lost (NFT will be consumed)
+                  </span>
+                </div>
+              )}
+              {redeemAmountNum === maxAmount && (
+                <div className="mt-2 pt-2 border-t border-orange-200">
+                  <span className="text-[11px] text-orange-700">
+                    ⚠️ NFT will be consumed after redemption
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -326,6 +413,7 @@ export default function RedeemGiftCardModal({ isOpen, onClose, giftCard }: Redee
                 error={txError}
                 commitTxid={commitTxid}
                 spellTxid={spellTxid}
+                type="redeem"
               />
             </div>
           )}

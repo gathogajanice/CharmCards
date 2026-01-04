@@ -89,9 +89,52 @@ export default function PartialTransferModal({ isOpen, onClose, giftCard }: Part
         throw new Error('No UTXOs available');
       }
 
+      // Get exact on-chain token amount from NFT metadata
+      // remaining_balance is stored in cents and represents the exact on-chain amount
+      const exactInputTokenAmount = giftCard.nftMetadata?.remaining_balance;
+      
+      if (!exactInputTokenAmount || exactInputTokenAmount <= 0) {
+        throw new Error(
+          'Invalid on-chain token balance. The gift card has no remaining balance. ' +
+          'Please check the gift card status or try refreshing your wallet.'
+        );
+      }
+      
+      // Calculate transfer and remaining amounts in cents
+      const transferAmountCents = Math.floor(transferAmountNum * 100);
+      const exactRemainingTokenAmount = exactInputTokenAmount - transferAmountCents;
+      
+      // Validate transfer amount
+      if (transferAmountCents <= 0) {
+        throw new Error('Transfer amount must be greater than zero');
+      }
+      
+      if (transferAmountCents > exactInputTokenAmount) {
+        throw new Error(
+          `Cannot transfer more than available balance. ` +
+          `On-chain balance: $${(exactInputTokenAmount / 100).toFixed(2)}, ` +
+          `Transfer amount: $${transferAmountNum.toFixed(2)}`
+        );
+      }
+      
+      // CRITICAL: Contract requires exact matches for partial transfer
+      // input_token_amount == input_nft.remaining_balance
+      // output_token_amount (sum) == input_token_amount (token conservation)
+      // output_nft.remaining_balance == output_token_amount (for output with NFT)
+      if (exactInputTokenAmount !== giftCard.nftMetadata.remaining_balance) {
+        throw new Error(
+          `Token amount mismatch: Input token amount (${exactInputTokenAmount}) ` +
+          `does not match NFT remaining_balance (${giftCard.nftMetadata.remaining_balance}). ` +
+          `This will cause contract validation to fail.`
+        );
+      }
+      
       // Create partial transfer spell - transfer token balance, keep NFT
       // Based on Charms token transfer documentation
       // Spell JSON format per: https://docs.charms.dev/references/spell-json/
+      // 
+      // IMPORTANT: Use exact on-chain amounts to prevent WASM validation failures
+      // Contract validates: token amounts must match NFT remaining_balance exactly
       const transferSpell = {
         version: 8, // Protocol version (8 is current Charms protocol version)
         apps: {
@@ -106,7 +149,7 @@ export default function PartialTransferModal({ isOpen, onClose, giftCard }: Part
             utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`, // Format: "txid:vout"
             charms: {
               "$00": giftCard.nftMetadata, // NFT metadata
-              "$01": Math.floor(giftCard.balance * 100), // Current token balance in cents
+              "$01": exactInputTokenAmount, // EXACT on-chain token amount in cents (not from UI state)
             },
           },
         ],
@@ -115,7 +158,7 @@ export default function PartialTransferModal({ isOpen, onClose, giftCard }: Part
           {
             address: recipientAddress, // Recipient Bitcoin address (Taproot format)
             charms: {
-              "$01": Math.floor(transferAmountNum * 100), // Transfer partial token balance in cents
+              "$01": transferAmountCents, // Transfer partial token balance in cents
             },
             sats: 1000, // Required: Bitcoin output value in satoshis
           },
@@ -123,16 +166,32 @@ export default function PartialTransferModal({ isOpen, onClose, giftCard }: Part
             address: address, // Keep NFT and remaining balance in same wallet
             charms: {
               "$00": {
-                // NFT with updated remaining balance
-                ...giftCard.nftMetadata,
-                remaining_balance: Math.floor(remainingBalance * 100), // Updated balance in cents
+                // NFT with updated remaining balance - all fields must be explicitly set
+                brand: giftCard.nftMetadata.brand,
+                image: giftCard.nftMetadata.image,
+                initial_amount: giftCard.nftMetadata.initial_amount,
+                expiration_date: giftCard.nftMetadata.expiration_date,
+                created_at: giftCard.nftMetadata.created_at,
+                remaining_balance: exactRemainingTokenAmount, // EXACT remaining balance (must match output token amount)
               },
-              "$01": Math.floor(remainingBalance * 100), // Remaining token balance in cents
+              "$01": exactRemainingTokenAmount, // EXACT remaining token balance (must match NFT remaining_balance)
             },
             sats: 1000, // Required: Bitcoin output value in satoshis
           },
         ],
       };
+      
+      // Verify spell matches contract requirements
+      console.log('🔍 Partial transfer spell validation:');
+      console.log(`   Input NFT remaining_balance: ${giftCard.nftMetadata.remaining_balance}`);
+      console.log(`   Input token amount: ${exactInputTokenAmount}`);
+      console.log(`   Match: ${exactInputTokenAmount === giftCard.nftMetadata.remaining_balance ? '✅' : '❌'}`);
+      console.log(`   Transfer amount: ${transferAmountCents} cents`);
+      console.log(`   Remaining amount: ${exactRemainingTokenAmount} cents`);
+      console.log(`   Token conservation: ${(transferAmountCents + exactRemainingTokenAmount) === exactInputTokenAmount ? '✅' : '❌'}`);
+      console.log(`   Output NFT remaining_balance: ${exactRemainingTokenAmount}`);
+      console.log(`   Output token amount: ${exactRemainingTokenAmount}`);
+      console.log(`   Match: ✅ (must match for contract validation)`);
 
       // Call API to generate proof
       setTxStatus('generating-proof');
@@ -301,6 +360,7 @@ export default function PartialTransferModal({ isOpen, onClose, giftCard }: Part
                 error={txError}
                 commitTxid={commitTxid}
                 spellTxid={spellTxid}
+                type="transfer"
               />
             </div>
           )}

@@ -73,6 +73,7 @@ export function ProductCard({ card, index }: ProductCardProps) {
               fill
               className={`object-cover transition-all duration-700 ${card.outOfStock ? 'grayscale opacity-50' : 'group-hover:scale-110 group-hover:rotate-2'}`}
               sizes="(max-width: 640px) 45vw, (max-width: 768px) 45vw, (max-width: 1024px) 23vw, 280px"
+              unoptimized={card.image?.includes('wikimedia.org') || card.image?.includes('upload.wikimedia.org') || card.image?.includes('logos-world.net')}
               onError={() => setImageError(true)}
             />
           

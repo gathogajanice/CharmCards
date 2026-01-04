@@ -1101,7 +1101,7 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             spellTxid,
             timestamp: Date.now(),
             amount: currentAmount,
-            appId, // For matching with blockchain data
+            appId, // For matching with blockchain data (64-character hex string from SHA256(inUtxo))
             recipientAddress: taprootAddress,
             initialAmount: Math.floor(currentAmount * 100), // In cents
             expirationDate: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60, // 1 year
@@ -1115,16 +1115,33 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
             
             // Also store in a separate key for easy access to new mints
             localStorage.setItem('lastMintedCard', JSON.stringify(mintedCardData));
+            
+            console.log('✅ Saved mint transaction to localStorage:', {
+              brand: name,
+              appId: appId.substring(0, 16) + '...',
+              commitTxid: commitTxid.substring(0, 16) + '...',
+              spellTxid: spellTxid.substring(0, 16) + '...',
+            });
           } catch (e) {
-            console.warn('Failed to save transaction history:', e);
+            console.warn('❌ Failed to save transaction history:', e);
           }
           
           // Mark as success - modal will handle redirect
           setTxStatus('success');
           
-          // Trigger refresh immediately
+          // Trigger refresh immediately after localStorage is updated
+          // Use setTimeout to ensure localStorage write is complete
           if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('refreshWalletData'));
+            setTimeout(() => {
+              console.log('🔄 Dispatching refreshWalletData event');
+              window.dispatchEvent(new CustomEvent('refreshWalletData', { 
+                detail: { 
+                  appId,
+                  commitTxid,
+                  spellTxid 
+                } 
+              }));
+            }, 100); // Small delay to ensure localStorage write completes
           }
         } catch (signError: any) {
           setTxStatus('error');
@@ -1166,6 +1183,7 @@ export default function GiftCardPurchase({ name, imageUrl, denominations, custom
               alt={name}
               fill
               className="object-cover"
+              unoptimized={imageUrl?.includes('wikimedia.org') || imageUrl?.includes('upload.wikimedia.org') || imageUrl?.includes('logos-world.net')}
               onError={() => setImageError(true)}
             />
             {discount && (
