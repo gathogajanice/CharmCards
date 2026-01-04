@@ -202,7 +202,7 @@ const featuredGiftCards = [
     {
       name: 'Expedia',
       range: '$25 - $1,000',
-      image: 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/Expedia_logo.svg/2560px-Expedia_logo.svg.png',
+      image: 'https://logos-world.net/wp-content/uploads/2020/11/Expedia-Logo.png',
       href: '/gift-card/expedia-us',
       outOfStock: false,
       category: 'travel',

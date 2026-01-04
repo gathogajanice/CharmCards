@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle2, Loader2, AlertCircle, ExternalLink, Bitcoin } from 'lucide-react';
 
 export type TransactionStatus = 'idle' | 'creating-spell' | 'generating-proof' | 'signing' | 'broadcasting' | 'confirming' | 'success' | 'error';
+export type TransactionType = 'mint' | 'redeem' | 'transfer' | 'burn';
 
 interface TransactionStatusProps {
   status: TransactionStatus;
@@ -12,6 +13,7 @@ interface TransactionStatusProps {
   spellTxid?: string;
   confirmations?: number;
   error?: string;
+  type?: TransactionType;
 }
 
 export default function TransactionStatus({ 
@@ -19,7 +21,8 @@ export default function TransactionStatus({
   commitTxid, 
   spellTxid, 
   confirmations = 0,
-  error 
+  error,
+  type = 'mint'
 }: TransactionStatusProps) {
   const steps = [
     { id: 'creating-spell', label: 'Creating Spell', description: 'Preparing your gift card NFT' },
@@ -96,10 +99,22 @@ export default function TransactionStatus({
               <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p className="text-[14px] font-semibold text-green-900 mb-2">
-                  Gift Card Minted Successfully!
+                  {type === 'redeem' 
+                    ? 'Gift Card Redeemed Successfully!'
+                    : type === 'transfer'
+                    ? 'Gift Card Transferred Successfully!'
+                    : type === 'burn'
+                    ? 'Gift Card Burned Successfully!'
+                    : 'Gift Card Minted Successfully!'}
                 </p>
                 <p className="text-[12px] text-green-700 mb-3">
-                  Your Bitcoin NFT gift card is now on-chain. View it in your collection.
+                  {type === 'redeem'
+                    ? 'Your gift card balance has been updated. The NFT remains in your wallet.'
+                    : type === 'transfer'
+                    ? 'Your gift card has been transferred to the recipient address.'
+                    : type === 'burn'
+                    ? 'Your gift card has been burned and removed from circulation.'
+                    : 'Your Bitcoin NFT gift card is now on-chain. View it in your collection.'}
                 </p>
                 {confirmations > 0 && (
                   <p className="text-[11px] text-green-600 mb-3">

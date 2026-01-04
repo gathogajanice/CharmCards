@@ -133,6 +133,11 @@ const EpicSuccessToastContent: React.FC<EpicSuccessToastProps> = ({
               alt={brand}
               fill
               className="object-cover"
+              unoptimized={image?.includes('wikimedia.org') || image?.includes('upload.wikimedia.org') || image?.includes('logos-world.net')}
+              onError={(e) => {
+                const target = e.target as HTMLImageElement;
+                target.src = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+              }}
             />
             <div className="absolute inset-0 bg-gradient-to-t from-green-500/20 to-transparent" />
           </motion.div>

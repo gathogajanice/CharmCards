@@ -87,6 +87,12 @@ export default function GiftCardDetailsModal({
               alt={giftCard.brand}
               fill
               className="object-contain p-8"
+              unoptimized={giftCard.image?.includes('wikimedia.org') || giftCard.image?.includes('upload.wikimedia.org')}
+              onError={(e) => {
+                // Fallback to a placeholder if image fails to load
+                const target = e.target as HTMLImageElement;
+                target.src = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+              }}
             />
           </div>
 

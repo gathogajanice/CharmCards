@@ -82,23 +82,51 @@ export default function WalletPage() {
     }
   );
   
-  // Listen for refresh events from modals
+  // Listen for refresh events from modals and mint operations
   useEffect(() => {
-    const handleRefresh = () => {
-      refreshAll(address);
+    const handleRefresh = (event?: CustomEvent) => {
+      console.log('🔄 Received refreshWalletData event', event?.detail);
+      if (address) {
+        console.log('   Invalidating React Query cache for wallet data...');
+        refreshAll(address);
+      } else {
+        console.warn('   Cannot refresh: no wallet address');
+      }
     };
     
-    window.addEventListener('refreshWalletData', handleRefresh);
+    window.addEventListener('refreshWalletData', handleRefresh as EventListener);
     return () => {
-      window.removeEventListener('refreshWalletData', handleRefresh);
+      window.removeEventListener('refreshWalletData', handleRefresh as EventListener);
     };
   }, [address, refreshAll]);
 
   // Convert wallet Charms to gift cards format
   const giftCards = walletCharms?.nfts
-    .filter(nft => nft.data) // Only NFTs with gift card data
+    .filter(nft => {
+      // Only NFTs with gift card data
+      if (!nft.data) {
+        console.warn(`⚠️ NFT filtered out: missing data structure (app_id: ${nft.app_id?.substring(0, 16) || 'unknown'}...)`);
+        return false;
+      }
+      
+      // Validate required fields
+      const data = nft.data as GiftCardNftMetadata;
+      if (!data.brand || data.brand.trim() === '') {
+        console.warn(`⚠️ NFT filtered out: missing brand (app_id: ${nft.app_id?.substring(0, 16) || 'unknown'}...)`);
+        return false;
+      }
+      
+      return true;
+    })
     .map((nft, index) => {
       const data = nft.data as GiftCardNftMetadata;
+      
+      // Ensure image is valid, use placeholder if missing
+      let image = data.image || '';
+      if (!image || image.trim() === '') {
+        image = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+        console.warn(`⚠️ NFT missing image, using placeholder: ${data.brand} (app_id: ${nft.app_id?.substring(0, 16)}...)`);
+      }
       
       // Try to get transaction info from localStorage or nft object
       let commitTxid: string | undefined;
@@ -128,8 +156,8 @@ export default function WalletPage() {
       
       return {
         id: `${nft.app_id}-${index}`,
-        brand: data.brand,
-        image: data.image,
+        brand: data.brand || 'Unknown',
+        image: image, // Always ensure we have a valid image URL
         balance: data.remaining_balance / 100, // Convert cents to dollars
         originalAmount: data.initial_amount / 100,
         expirationDate: data.expiration_date ? new Date(data.expiration_date * 1000).toISOString() : null,
@@ -141,6 +169,18 @@ export default function WalletPage() {
         category: '', // Can be extracted from brand or metadata if available
       };
     }) || [];
+  
+  // Log gift cards for debugging
+  useEffect(() => {
+    if (giftCards.length > 0) {
+      console.log(`📊 Wallet page: Found ${giftCards.length} gift card(s) to display`);
+      giftCards.forEach((card, idx) => {
+        console.log(`   Card ${idx + 1}: ${card.brand} (image: ${card.image ? 'present' : 'missing'}, balance: $${card.balance.toFixed(2)})`);
+      });
+    } else {
+      console.log(`📊 Wallet page: No gift cards found (walletCharms?.nfts.length: ${walletCharms?.nfts.length || 0})`);
+    }
+  }, [giftCards, walletCharms]);
 
   // Check for newly minted card from sessionStorage
   useEffect(() => {
@@ -531,10 +571,19 @@ export default function WalletPage() {
                     )}
                   </button>
                   <Image
-                    src={card.image}
+                    src={card.image || 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop'}
                     alt={card.brand}
                     fill
                     className="object-contain p-6 group-hover:scale-105 transition-transform duration-300"
+                    unoptimized={card.image?.includes('wikimedia.org') || card.image?.includes('upload.wikimedia.org') || !card.image}
+                    onError={(e) => {
+                      // Fallback to a placeholder if image fails to load
+                      const target = e.target as HTMLImageElement;
+                      if (target.src !== 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop') {
+                        target.src = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+                        console.warn(`⚠️ Image failed to load for ${card.brand}, using placeholder`);
+                      }
+                    }}
                   />
                   <div className="absolute top-3 right-3 flex flex-col gap-1.5">
                     <div className="bg-black text-white text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full">

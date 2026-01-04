@@ -65,17 +65,19 @@ async function cachedFetch(url: string, options?: RequestInit): Promise<Response
  */
 export async function getWalletCharms(address: string): Promise<WalletCharms> {
   try {
+    console.log(`🔍 getWalletCharms: Starting fresh fetch for address ${address.substring(0, 16)}...`);
+    
     // 1. Fetch UTXOs for address
     const utxos = await getWalletUtxos(address, null);
-    if (utxos.length === 0) {
-      return { address, nfts: [], tokens: [] };
-    }
-
+    console.log(`   📦 Found ${utxos.length} UTXOs`);
+    
+    // Always start with empty arrays to ensure fresh data on each call
     const nfts: CharmsAsset[] = [];
     const tokens: CharmsAsset[] = [];
     const processedTxids = new Set<string>();
 
     // 2. For each UTXO, fetch transaction data and check for Charms
+    // Note: Even if no UTXOs, we still check localStorage for mints
     for (const utxo of utxos) {
       // Skip if we've already processed this transaction
       if (processedTxids.has(utxo.txid)) continue;
@@ -112,22 +114,31 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
                 );
                 
                 if (mintTx && mintTx.type === 'mint') {
-                  // Try to fetch from API to get actual NFT data
-                  // For now, construct from stored data
-                  const appId = utxo.txid.substring(0, 16); // Simplified app_id
+                  // Use the stored appId from localStorage (64-character hex string)
+                  // This matches the app_id calculated during minting as SHA256(inUtxo)
+                  const appId = mintTx.appId || mintTx.spellTxid?.substring(0, 64) || mintTx.commitTxid?.substring(0, 64) || 'unknown';
+                  
+                  console.log(`✅ Found mint transaction in localStorage for UTXO ${utxo.txid}:${utxo.vout}`);
+                  console.log(`   Using appId: ${appId.substring(0, 16)}... (${appId.length} chars)`);
                   
                   // Check if this is an NFT (gift card)
                   const nftData = await tryExtractGiftCardFromUtxo(utxo, address);
                   if (nftData) {
+                    console.log(`   Adding NFT to wallet: ${nftData.brand} (app_id: ${appId.substring(0, 16)}...)`);
                     nfts.push({
                       type: 'nft',
-                      app_id: appId,
-                      app_vk: appId, // Simplified
+                      app_id: appId, // Use the correct 64-character app_id
+                      app_vk: appId, // Use app_id as app_vk (will be corrected by API if needed)
                       data: nftData,
-                    });
+                      utxoId: `${utxo.txid}:${utxo.vout}`, // Store UTXO ID for exclusion tracking
+                      // Store transaction IDs for reference
+                      commitTxid: mintTx.commitTxid,
+                      spellTxid: mintTx.spellTxid,
+                    } as any);
                   }
                 }
               } catch (e) {
+                console.warn(`Failed to check localStorage for UTXO ${utxo.txid}:${utxo.vout}:`, e);
                 // Continue if localStorage parsing fails
               }
             }
@@ -151,29 +162,112 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
     // Extended duration: show cards from localStorage until blockchain confirms (or permanently if appId matches)
     try {
       const txHistory = JSON.parse(localStorage.getItem('charmCardsTxHistory') || '[]');
+      console.log(`📦 Checking localStorage for recent mints: found ${txHistory.length} transactions`);
+      
+      // Log all mint transactions found
+      const mintTransactions = txHistory.filter((h: any) => h.type === 'mint');
+      console.log(`   📋 Found ${mintTransactions.length} mint transaction(s) in localStorage:`);
+      mintTransactions.forEach((mint: any, idx: number) => {
+        console.log(`      ${idx + 1}. ${mint.brand || 'Unknown'} - $${(mint.amount || 0).toFixed(2)} (appId: ${mint.appId?.substring(0, 16) || 'missing'}..., image: ${mint.image ? 'present' : 'missing'})`);
+      });
+      
       const recentMints = txHistory
         .filter((h: any) => {
           if (h.type !== 'mint') return false;
-          // Show if minted in last 24 hours OR if we have appId and it doesn't match any existing NFT
-          const isRecent = Date.now() - h.timestamp < 24 * 60 * 60 * 1000; // Last 24 hours
-          const hasAppId = h.appId && !nfts.find(n => n.app_id === h.appId);
-          return isRecent || hasAppId;
+          
+          // Show ALL mint transactions - check if it's already in nfts to avoid duplicates
+          // Check by appId first, then by commitTxid/spellTxid as fallback
+          let alreadyExists = false;
+          
+          if (h.appId) {
+            // Check if NFT with same appId already exists
+            alreadyExists = nfts.some(n => n.app_id === h.appId);
+          }
+          
+          // Also check by transaction IDs if appId check didn't find a match
+          if (!alreadyExists && (h.commitTxid || h.spellTxid)) {
+            alreadyExists = nfts.some(n => 
+              (n as any).commitTxid === h.commitTxid || 
+              (n as any).spellTxid === h.spellTxid ||
+              (n as any).commitTxid === h.spellTxid ||
+              (n as any).spellTxid === h.commitTxid
+            );
+          }
+          
+          const shouldShow = !alreadyExists;
+          
+          if (shouldShow) {
+            console.log(`   ✅ Including mint: ${h.brand} (appId: ${h.appId?.substring(0, 16) || 'missing'}, commitTxid: ${h.commitTxid?.substring(0, 16) || 'missing'}...)`);
+          } else {
+            console.log(`   ⏭️  Skipping mint (already in nfts): ${h.brand} (appId: ${h.appId?.substring(0, 16) || 'missing'}...)`);
+          }
+          
+          return shouldShow;
         })
         .map((h: any) => {
-          // Use appId from storage if available, otherwise generate from txid
-          const appId = h.appId || h.spellTxid?.substring(0, 32) || h.commitTxid?.substring(0, 32) || 'unknown';
+          // Use appId from storage if available (64-character hex string from SHA256(inUtxo))
+          // Fallback to full spellTxid or commitTxid if appId is missing (shouldn't happen for new mints)
+          const appId = h.appId || h.spellTxid?.substring(0, 64) || h.commitTxid?.substring(0, 64) || 'unknown';
           const brand = h.brand || 'Unknown';
+          
+          // Validate and get image with proper fallback
+          // ALWAYS ensure we have a valid image URL - this is critical for display
+          let image = h.image || '';
+          
+          console.log(`   🖼️  Processing image for ${brand}: original="${image ? 'present' : 'missing'}"`);
+          
+          // If image is empty string or invalid, try to get from brand mapping
+          if (!image || image.trim() === '') {
+            image = getGiftCardImage(brand);
+            if (image) {
+              console.log(`   ✅ Image found via brand mapping for ${brand}`);
+            } else {
+              console.log(`   ⚠️  Brand mapping returned no image for ${brand}`);
+            }
+          }
+          
+          // CRITICAL: Final fallback to placeholder if still empty - this MUST always be set
+          if (!image || image.trim() === '') {
+            image = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+            console.log(`   🔧 Using placeholder image for ${brand} (no image found in localStorage or brand mapping)`);
+          }
+          
+          // Final validation - image should NEVER be empty at this point
+          if (!image || image.trim() === '') {
+            console.error(`   ❌ CRITICAL ERROR: Image is still empty for ${brand} after all fallbacks!`);
+            // Force set placeholder as last resort
+            image = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+          }
+          
+          console.log(`   ✅ Final image for ${brand}: ${image ? 'SET' : 'MISSING'}`);
+          
+          // Validate and ensure all required fields are present
+          const initialAmount = h.initialAmount || Math.floor((h.amount || 0) * 100);
+          const remainingBalance = h.initialAmount || Math.floor((h.amount || 0) * 100);
+          const expirationDate = h.expirationDate || Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+          const createdAt = h.createdAt || Math.floor(h.timestamp / 1000);
+          
+          // Validate data structure completeness
+          if (!brand || brand.trim() === '') {
+            console.warn(`   ⚠️  Missing brand for mint, using 'Unknown'`);
+          }
+          if (initialAmount <= 0) {
+            console.warn(`   ⚠️  Invalid initial amount for ${brand}: ${initialAmount}`);
+          }
+          
+          console.log(`   📝 Creating NFT from localStorage: ${brand} (appId: ${appId.substring(0, 16)}... (${appId.length} chars), image: ${image ? 'present' : 'missing'})`);
+          
           return {
             type: 'nft' as const,
-            app_id: appId,
-            app_vk: appId,
+            app_id: appId, // Use the correct 64-character app_id
+            app_vk: appId, // Use app_id as app_vk (will be corrected by API if needed)
             data: {
-              brand,
-              image: h.image || getGiftCardImage(brand),
-              initial_amount: h.initialAmount || Math.floor((h.amount || 0) * 100),
-              remaining_balance: h.initialAmount || Math.floor((h.amount || 0) * 100),
-              expiration_date: h.expirationDate || Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60,
-              created_at: h.createdAt || Math.floor(h.timestamp / 1000),
+              brand: brand || 'Unknown',
+              image: image, // Always ensure we have a valid image URL
+              initial_amount: initialAmount,
+              remaining_balance: remainingBalance,
+              expiration_date: expirationDate,
+              created_at: createdAt,
             },
             // Store transaction IDs for reference
             commitTxid: h.commitTxid,
@@ -181,14 +275,149 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
           };
         });
       
+      console.log(`   📊 Found ${recentMints.length} mints from localStorage to process`);
+      console.log(`   📋 Current nfts array has ${nfts.length} items before merging`);
+      
+      // Validate and filter out invalid NFTs before merging
+      // Note: Image validation is relaxed since we always set a placeholder in the map function above
+      const validMints = recentMints.filter((mint: any) => {
+        // Check if data structure is complete
+        if (!mint.data) {
+          console.warn(`   ❌ Invalid NFT: missing data structure for ${mint.app_id?.substring(0, 16) || 'unknown'}`);
+          return false;
+        }
+        
+        // Check required fields
+        const data = mint.data;
+        if (!data.brand || data.brand.trim() === '') {
+          console.warn(`   ❌ Invalid NFT: missing brand for app_id ${mint.app_id?.substring(0, 16) || 'unknown'}`);
+          return false;
+        }
+        
+        // Image validation: Since we always set a placeholder in the map function above,
+        // this check should never fail. However, we verify it exists as a safety check.
+        // If image is missing, we set it here as a last resort (shouldn't happen).
+        if (!data.image || data.image.trim() === '') {
+          console.error(`   ❌ CRITICAL: Image is missing for ${data.brand} (app_id: ${mint.app_id?.substring(0, 16) || 'unknown'}) - this should not happen!`);
+          // Set placeholder as emergency fallback
+          data.image = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+          console.log(`   🔧 Emergency: Set placeholder image for ${data.brand}`);
+        }
+        
+        if (data.initial_amount === undefined || data.initial_amount === null || data.initial_amount < 0) {
+          console.warn(`   ❌ Invalid NFT: invalid initial_amount for ${data.brand} (app_id: ${mint.app_id?.substring(0, 16) || 'unknown'})`);
+          return false;
+        }
+        
+        if (data.remaining_balance === undefined || data.remaining_balance === null || data.remaining_balance < 0) {
+          console.warn(`   ❌ Invalid NFT: invalid remaining_balance for ${data.brand} (app_id: ${mint.app_id?.substring(0, 16) || 'unknown'})`);
+          return false;
+        }
+        
+        // Log validation success with image status
+        const imageStatus = data.image ? (data.image.includes('unsplash.com') ? 'placeholder' : 'brand image') : 'MISSING';
+        console.log(`   ✅ Valid NFT: ${data.brand} (app_id: ${mint.app_id?.substring(0, 16)}..., image: ${imageStatus}, amount: $${(data.initial_amount / 100).toFixed(2)})`);
+        return true;
+      });
+      
+      console.log(`   📊 Validated ${validMints.length} valid NFTs out of ${recentMints.length} total`);
+      
+      // Log validation results
+      if (validMints.length < recentMints.length) {
+        const invalidCount = recentMints.length - validMints.length;
+        console.warn(`   ⚠️  ${invalidCount} NFT(s) failed validation and were filtered out`);
+        recentMints.forEach((mint: any) => {
+          if (!validMints.includes(mint)) {
+            const data = mint.data;
+            console.warn(`      - ${data?.brand || 'Unknown'}: validation failed (check logs above for reason)`);
+          }
+        });
+      }
+      
       // Merge with existing NFTs, avoiding duplicates by app_id
-      for (const mint of recentMints) {
-        if (!nfts.find(n => n.app_id === mint.app_id)) {
+      let addedCount = 0;
+      let skippedCount = 0;
+      let invalidCount = recentMints.length - validMints.length;
+      
+      console.log(`   🔄 Merging ${validMints.length} valid NFT(s) with existing ${nfts.length} NFT(s)...`);
+      console.log(`   📝 Duplicate detection strategy: Transaction IDs (commitTxid/spellTxid) first, then app_id as fallback`);
+      
+      for (const mint of validMints) {
+        const mintCommitTxid = mint.commitTxid?.substring(0, 16) || 'none';
+        const mintSpellTxid = mint.spellTxid?.substring(0, 16) || 'none';
+        console.log(`   🔍 Checking for duplicates: ${mint.data.brand} (app_id: ${mint.app_id.substring(0, 16)}..., commitTxid: ${mintCommitTxid}..., spellTxid: ${mintSpellTxid}...)`);
+        // Check for duplicates using transaction IDs first (primary method)
+        // Transaction IDs are unique per mint, even if app_id is the same
+        let existing = null;
+        let duplicateDetectionMethod = '';
+        
+        // Check if this mint has transaction IDs
+        const hasTransactionIds = !!(mint.commitTxid || mint.spellTxid);
+        
+        if (hasTransactionIds) {
+          // Primary: Check by transaction IDs (most reliable - unique per mint)
+          // If transaction IDs exist and don't match, this is NOT a duplicate (even if app_id matches)
+          existing = nfts.find(n => {
+            const nCommitTxid = (n as any).commitTxid;
+            const nSpellTxid = (n as any).spellTxid;
+            const match = 
+              (mint.commitTxid && (nCommitTxid === mint.commitTxid || nSpellTxid === mint.commitTxid)) ||
+              (mint.spellTxid && (nCommitTxid === mint.spellTxid || nSpellTxid === mint.spellTxid));
+            return match;
+          });
+          
+          if (existing) {
+            duplicateDetectionMethod = 'transaction ID';
+            console.log(`      ✅ Duplicate found by transaction ID: ${mint.data.brand} matches existing NFT`);
+          } else {
+            console.log(`      ✅ No duplicate found by transaction ID: ${mint.data.brand} is unique (different transaction IDs)`);
+          }
+        }
+        
+        // Fallback: Check by app_id ONLY if transaction IDs are completely missing
+        // If transaction IDs exist but don't match, we should NOT check by app_id
+        // because different mints can share the same app_id (same UTXO used)
+        if (!existing && !hasTransactionIds && mint.app_id) {
+          console.log(`      ⚠️  No transaction IDs available for ${mint.data.brand}, falling back to app_id check`);
+          existing = nfts.find(n => {
+            const match = n.app_id === mint.app_id;
+            return match;
+          });
+          
+          if (existing) {
+            duplicateDetectionMethod = 'app_id (no transaction IDs)';
+            console.log(`      ✅ Duplicate found by app_id: ${mint.data.brand} matches existing NFT`);
+          }
+        }
+        
+        if (!existing) {
+          const imageType = mint.data.image?.includes('unsplash.com') ? 'placeholder' : 'brand image';
+          console.log(`   ➕ Adding new NFT to wallet: ${mint.data.brand} (app_id: ${mint.app_id.substring(0, 16)}..., commitTxid: ${mint.commitTxid?.substring(0, 16) || 'none'}..., balance: $${(mint.data.remaining_balance / 100).toFixed(2)}, image: ${imageType})`);
           nfts.push(mint);
+          addedCount++;
+        } else {
+          const existingBrand = (existing as any).data?.brand || 'Unknown';
+          console.log(`   ⏭️  Skipping duplicate NFT: ${mint.data.brand} (detected by ${duplicateDetectionMethod || 'unknown method'}, matches existing: ${existingBrand}, app_id: ${mint.app_id.substring(0, 16)}..., commitTxid: ${mint.commitTxid?.substring(0, 16) || 'none'}...)`);
+          skippedCount++;
         }
       }
+      
+      if (invalidCount > 0) {
+        console.warn(`   ⚠️  Filtered out ${invalidCount} invalid NFT(s) due to missing or invalid data`);
+      }
+      
+      console.log(`✅ Merge complete: Added ${addedCount} new NFTs, skipped ${skippedCount} duplicates, filtered ${invalidCount} invalid. Total NFTs now: ${nfts.length}`);
     } catch (e) {
-      console.warn('Failed to check localStorage for recent mints:', e);
+      console.warn('❌ Failed to check localStorage for recent mints:', e);
+    }
+
+    // Final summary
+    console.log(`🎯 getWalletCharms complete: Returning ${nfts.length} NFT(s) and ${tokens.length} token(s) for address ${address.substring(0, 16)}...`);
+    if (nfts.length > 0) {
+      nfts.forEach((nft, idx) => {
+        const data = nft.data as any;
+        console.log(`   NFT ${idx + 1}: ${data?.brand || 'Unknown'} (app_id: ${nft.app_id?.substring(0, 16)}..., image: ${data?.image ? 'present' : 'missing'})`);
+      });
     }
 
     return { address, nfts, tokens };
@@ -201,23 +430,61 @@ export async function getWalletCharms(address: string): Promise<WalletCharms> {
 /**
  * Get gift card image URL from brand name
  * Maps brand names to their image URLs
+ * Supports case-insensitive matching and brand name normalization
  */
 function getGiftCardImage(brand: string): string {
-  // Map of brand names to image URLs
+  if (!brand || brand.trim() === '') {
+    console.warn(`   ⚠️  getGiftCardImage: Empty brand name provided`);
+    return '';
+  }
+  
+  // Normalize brand name: trim and prepare for case-insensitive matching
+  const normalizedBrand = brand.trim();
+  
+  // Map of brand names to image URLs (using normalized keys)
   const brandImages: Record<string, string> = {
-    'Amazon.com': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain',
-    'DoorDash': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177180674.png',
-    'Apple': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177192472.png',
-    'Uber Eats': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177226936.png',
-    'Uber': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T134944.605-1766098833835.png?width=8000&height=8000&resize=contain',
-    'Walmart': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T005009.811-1766181015323.png?width=8000&height=8000&resize=contain',
-    'Netflix': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T010616.484-1766182009151.png?width=8000&height=8000&resize=contain',
-    'Starbucks': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T010825.448-1766182140763.png?width=8000&height=8000&resize=contain',
-    'Nike': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T004830.670-1766180915054.png?width=8000&height=8000&resize=contain',
-    'Expedia': 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/Expedia_logo.svg/2560px-Expedia_logo.svg.png',
+    'amazon.com': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain',
+    'amazon': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T002841.206-1766179817903.png?width=8000&height=8000&resize=contain',
+    'doordash': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177180674.png',
+    'apple': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177192472.png',
+    'uber eats': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/image-1766177226936.png',
+    'uber': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-13T134944.605-1766098833835.png?width=8000&height=8000&resize=contain',
+    'walmart': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T005009.811-1766181015323.png?width=8000&height=8000&resize=contain',
+    'netflix': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T010616.484-1766182009151.png?width=8000&height=8000&resize=contain',
+    'starbucks': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T010825.448-1766182140763.png?width=8000&height=8000&resize=contain',
+    'nike': 'https://slelguoygbfzlpylpxfs.supabase.co/storage/v1/render/image/public/document-uploads/Title-2025-12-20T004830.670-1766180915054.png?width=8000&height=8000&resize=contain',
+    'expedia': 'https://logos-world.net/wp-content/uploads/2020/11/Expedia-Logo.png',
   };
   
-  return brandImages[brand] || '';
+  // Try exact match first (case-sensitive)
+  if (brandImages[normalizedBrand]) {
+    console.log(`   ✅ getGiftCardImage: Found exact match for "${brand}"`);
+    return brandImages[normalizedBrand];
+  }
+  
+  // Try case-insensitive match
+  const lowerBrand = normalizedBrand.toLowerCase();
+  if (brandImages[lowerBrand]) {
+    console.log(`   ✅ getGiftCardImage: Found case-insensitive match for "${brand}" (normalized to "${lowerBrand}")`);
+    return brandImages[lowerBrand];
+  }
+  
+  // Try matching without common suffixes/prefixes
+  const variations = [
+    lowerBrand.replace(/\.com$/i, ''), // Remove .com
+    lowerBrand.replace(/\s+/g, ''), // Remove spaces
+    lowerBrand.replace(/[^a-z0-9]/g, ''), // Remove all non-alphanumeric
+  ];
+  
+  for (const variation of variations) {
+    if (variation && brandImages[variation]) {
+      console.log(`   ✅ getGiftCardImage: Found match for "${brand}" via variation "${variation}"`);
+      return brandImages[variation];
+    }
+  }
+  
+  console.warn(`   ⚠️  getGiftCardImage: No image found for brand "${brand}" (tried: "${normalizedBrand}", "${lowerBrand}", and variations)`);
+  return '';
 }
 
 /**
@@ -237,18 +504,54 @@ async function tryExtractGiftCardFromUtxo(
     
     if (relatedTx && relatedTx.type === 'mint') {
       const brand = relatedTx.brand || 'Unknown';
+      
+      console.log(`   📋 Extracting gift card data from localStorage: ${brand}`);
+      
+      // Validate and get image with proper fallback - ALWAYS ensure we have a valid image URL
+      let image = relatedTx.image || '';
+      
+      if (!image || image.trim() === '') {
+        image = getGiftCardImage(brand);
+        if (image) {
+          console.log(`   ✅ Image found via brand mapping for ${brand}`);
+        } else {
+          console.log(`   ⚠️  Brand mapping returned no image for ${brand}`);
+        }
+      }
+      
+      // CRITICAL: Final fallback to placeholder if still empty - this MUST always be set
+      if (!image || image.trim() === '') {
+        image = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+        console.log(`   🔧 Using placeholder image for ${brand} (no image found in localStorage or brand mapping)`);
+      }
+      
+      // Final validation - image should NEVER be empty at this point
+      if (!image || image.trim() === '') {
+        console.error(`   ❌ CRITICAL ERROR: Image is still empty for ${brand} after all fallbacks!`);
+        // Force set placeholder as last resort
+        image = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?q=80&w=600&auto=format&fit=crop';
+      }
+      
+      const initialAmount = relatedTx.initialAmount || Math.floor((relatedTx.amount || 0) * 100);
+      const remainingBalance = relatedTx.initialAmount || Math.floor((relatedTx.amount || 0) * 100);
+      const expirationDate = relatedTx.expirationDate || Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+      const createdAt = relatedTx.createdAt || Math.floor(relatedTx.timestamp / 1000);
+      
+      console.log(`   ✅ Extracted data for ${brand}: image=${image ? 'SET' : 'MISSING'}, amount=$${(initialAmount / 100).toFixed(2)}`);
+      
       return {
-        brand,
-        image: relatedTx.image || getGiftCardImage(brand),
-        initial_amount: Math.floor((relatedTx.amount || 0) * 100),
-        remaining_balance: Math.floor((relatedTx.amount || 0) * 100),
-        expiration_date: Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60,
-        created_at: Math.floor(relatedTx.timestamp / 1000),
+        brand: brand || 'Unknown',
+        image: image, // Always ensure we have a valid image URL
+        initial_amount: initialAmount,
+        remaining_balance: remainingBalance,
+        expiration_date: expirationDate,
+        created_at: createdAt,
       };
     }
     
     return null;
   } catch (e) {
+    console.warn(`Failed to extract gift card from UTXO ${utxo.txid}:${utxo.vout}:`, e);
     return null;
   }
 }
@@ -1872,6 +2175,89 @@ export async function filterSyncedUtxos(
   }
 
   return { syncedUtxos, unsyncedUtxos, prunedUtxos, unconfirmedUtxos };
+}
+
+/**
+ * Find a plain Bitcoin UTXO (without charms) to use for funding transactions
+ * Excludes UTXOs that contain charms and returns the first suitable UTXO
+ * 
+ * @param address Wallet address
+ * @param excludeUtxos Array of UTXO IDs to exclude (format: "txid:vout")
+ * @param minValue Minimum value in satoshis (default: 1000)
+ * @returns Plain Bitcoin UTXO or null if none found
+ */
+export async function findFundingUtxo(
+  address: string,
+  excludeUtxos: string[] = [],
+  minValue: number = 1000
+): Promise<{ txid: string; vout: number; value: number } | null> {
+  try {
+    console.log(`🔍 Finding funding UTXO for address ${address.substring(0, 16)}...`);
+    
+    // Get all UTXOs
+    const allUtxos = await getWalletUtxos(address, null);
+    if (allUtxos.length === 0) {
+      console.warn('⚠️ No UTXOs found for address');
+      return null;
+    }
+    
+    console.log(`   Found ${allUtxos.length} total UTXOs`);
+    
+    // Get known charm UTXOs to exclude
+    const charms = await getWalletCharms(address);
+    const charmUtxoIds = new Set<string>();
+    
+    // Collect all UTXO IDs from charms
+    for (const nft of charms.nfts) {
+      if (nft.utxoId) {
+        charmUtxoIds.add(nft.utxoId);
+      }
+    }
+    for (const token of charms.tokens) {
+      if (token.utxoId) {
+        charmUtxoIds.add(token.utxoId);
+      }
+    }
+    
+    // Also exclude explicitly provided UTXOs
+    for (const excludeUtxo of excludeUtxos) {
+      charmUtxoIds.add(excludeUtxo);
+    }
+    
+    console.log(`   Excluding ${charmUtxoIds.size} charm/excluded UTXOs`);
+    
+    // Filter to plain Bitcoin UTXOs (not containing charms)
+    const plainUtxos = allUtxos.filter(utxo => {
+      const utxoId = `${utxo.txid}:${utxo.vout}`;
+      return !charmUtxoIds.has(utxoId);
+    });
+    
+    console.log(`   Found ${plainUtxos.length} plain Bitcoin UTXOs`);
+    
+    if (plainUtxos.length === 0) {
+      console.warn('⚠️ No plain Bitcoin UTXOs found (all contain charms or are excluded)');
+      return null;
+    }
+    
+    // Sort by value (descending) and find first with sufficient value
+    plainUtxos.sort((a, b) => b.value - a.value);
+    
+    // Try to find one with minimum value
+    const suitableUtxo = plainUtxos.find(utxo => utxo.value >= minValue);
+    
+    if (suitableUtxo) {
+      console.log(`✅ Found funding UTXO: ${suitableUtxo.txid}:${suitableUtxo.vout} (${suitableUtxo.value} sats)`);
+      return suitableUtxo;
+    }
+    
+    // Fallback: use the largest plain UTXO even if below minimum
+    const largestUtxo = plainUtxos[0];
+    console.log(`⚠️ Using largest plain UTXO (${largestUtxo.value} sats) - below recommended minimum of ${minValue} sats`);
+    return largestUtxo;
+  } catch (error: any) {
+    console.error('❌ Error finding funding UTXO:', error.message);
+    return null;
+  }
 }
 
 export async function getWalletUtxos(

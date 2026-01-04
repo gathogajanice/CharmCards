@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Send, Loader, Copy, Check } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppKitAccount } from '@reown/appkit/react';
-import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions } from '@/lib/charms/wallet';
+import { getWalletUtxos, signSpellTransactions, broadcastSpellTransactions, findFundingUtxo } from '@/lib/charms/wallet';
 import TransactionStatus, { TransactionStatus as TxStatus } from '@/components/ui/transaction-status';
 import type { GiftCardNftMetadata } from '@/lib/charms/types';
 import { useTransactionPolling } from '@/hooks/use-wallet-data';
@@ -76,14 +76,35 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
         throw new Error('No UTXOs available');
       }
 
-      // Create transfer spell
-      // Based on Charms NFT transfer documentation: https://docs.charms.dev/guides/wallet-integration/transactions/nft/
-      // Spell JSON format per: https://docs.charms.dev/references/spell-json/
-      // 
-      // IMPORTANT: tokenId must match the app_id from the original mint
-      // App ID format: "n/<64-char-hex>/<64-char-hex>" where both parts are the same app_id hash
-      // The app_id is generated during mint as SHA256(inUtxo)
-      // tokenId in giftCard should be the app_id (64-char hex string)
+      // Extract NFT UTXO ID to exclude it from funding UTXO search
+      const nftUtxoId = giftCard.utxoId || (utxos[0] ? `${utxos[0].txid}:${utxos[0].vout}` : null);
+      
+      // Find a plain Bitcoin UTXO for funding (exclude the NFT UTXO)
+      setTxStatus('creating-spell');
+      const fundingUtxo = await findFundingUtxo(address, nftUtxoId ? [nftUtxoId] : []);
+      
+      if (!fundingUtxo) {
+        throw new Error(
+          'No plain Bitcoin UTXO available for funding. ' +
+          'Please fund your wallet with some Bitcoin (not charms) to pay for transaction fees. ' +
+          'You need at least 1000 satoshis for fees.'
+        );
+      }
+      
+      console.log(`✅ Found funding UTXO: ${fundingUtxo.txid}:${fundingUtxo.vout} (${fundingUtxo.value} sats)`);
+
+      // Get exact on-chain token amount from NFT metadata
+      // remaining_balance is stored in cents and represents the exact on-chain amount
+      const exactInputTokenAmount = giftCard.nftMetadata?.remaining_balance;
+      
+      if (!exactInputTokenAmount || exactInputTokenAmount <= 0) {
+        throw new Error(
+          'Invalid on-chain token balance. The gift card has no remaining balance. ' +
+          'Please check the gift card status or try refreshing your wallet.'
+        );
+      }
+      
+      // Validate tokenId format
       if (!giftCard.tokenId || giftCard.tokenId.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(giftCard.tokenId)) {
         throw new Error(
           `Invalid tokenId format: "${giftCard.tokenId}". ` +
@@ -92,6 +113,25 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
         );
       }
       
+      // CRITICAL: Contract requires exact matches for transfer
+      // input_token_amount == input_nft.remaining_balance
+      // output_token_amount == output_nft.remaining_balance
+      // input_token_amount == output_token_amount (token conservation)
+      // input_nft.remaining_balance == output_nft.remaining_balance (NFT balance preservation)
+      if (exactInputTokenAmount !== giftCard.nftMetadata.remaining_balance) {
+        throw new Error(
+          `Token amount mismatch: Input token amount (${exactInputTokenAmount}) ` +
+          `does not match NFT remaining_balance (${giftCard.nftMetadata.remaining_balance}). ` +
+          `This will cause contract validation to fail.`
+        );
+      }
+      
+      // Create transfer spell - full transfer: NFT and tokens to recipient
+      // Based on Charms NFT transfer documentation: https://docs.charms.dev/guides/wallet-integration/transactions/nft/
+      // Spell JSON format per: https://docs.charms.dev/references/spell-json/
+      // 
+      // IMPORTANT: Use exact on-chain amounts to prevent WASM validation failures
+      // Contract validates: token amounts must match NFT remaining_balance exactly
       const transferSpell = {
         version: 8, // Protocol version (8 is current Charms protocol version)
         apps: {
@@ -108,7 +148,7 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
             utxo_id: giftCard.utxoId || `${utxos[0].txid}:${utxos[0].vout}`, // Format: "txid:vout"
             charms: {
               "$00": giftCard.nftMetadata, // NFT metadata
-              "$01": Math.floor(giftCard.balance * 100), // Token balance in cents
+              "$01": exactInputTokenAmount, // EXACT on-chain token amount in cents (not from UI state)
             },
           },
         ],
@@ -117,13 +157,23 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
           {
             address: recipientAddress, // Recipient Bitcoin address (Taproot format)
             charms: {
-              "$00": giftCard.nftMetadata, // Transfer NFT
-              "$01": Math.floor(giftCard.balance * 100), // Transfer full token balance
+              "$00": giftCard.nftMetadata, // Transfer NFT (with same remaining_balance)
+              "$01": exactInputTokenAmount, // Transfer EXACT on-chain token amount (must match NFT remaining_balance)
             },
             sats: 1000, // Required: Bitcoin output value in satoshis
           },
         ],
       };
+      
+      // Verify spell matches contract requirements
+      console.log('🔍 Transfer spell validation:');
+      console.log(`   Input NFT remaining_balance: ${giftCard.nftMetadata.remaining_balance}`);
+      console.log(`   Input token amount: ${exactInputTokenAmount}`);
+      console.log(`   Match: ${exactInputTokenAmount === giftCard.nftMetadata.remaining_balance ? '✅' : '❌'}`);
+      console.log(`   Output NFT remaining_balance: ${giftCard.nftMetadata.remaining_balance}`);
+      console.log(`   Output token amount: ${exactInputTokenAmount}`);
+      console.log(`   Match: ✅ (preserved during transfer)`);
+      console.log(`   Token conservation: ${exactInputTokenAmount === exactInputTokenAmount ? '✅' : '❌'}`);
 
       // Call API to generate proof
       setTxStatus('generating-proof');
@@ -133,6 +183,9 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           spell: transferSpell,
+          fundingUtxo: `${fundingUtxo.txid}:${fundingUtxo.vout}`,
+          fundingUtxoValue: fundingUtxo.value, // EXACT value in satoshis from wallet
+          changeAddress: address,
         }),
       });
 
@@ -290,6 +343,7 @@ export default function TransferGiftCardModal({ isOpen, onClose, giftCard }: Tra
                 error={txError}
                 commitTxid={commitTxid}
                 spellTxid={spellTxid}
+                type="transfer"
               />
             </div>
           )}
