@@ -45,7 +45,8 @@ const execAsync = promisify(exec);
 export interface SpellYaml {
   version: number;
   apps: Record<string, string>;
-  private_inputs?: Record<string, string>;
+  public_inputs?: Record<string, any>; // Optional public inputs for app contract execution
+  private_inputs?: Record<string, string>; // Optional private inputs (e.g., funding UTXO for minting)
   ins: Array<{
     utxo_id: string;
     charms: Record<string, any>;
@@ -428,9 +429,12 @@ export class CharmsService {
     feeRate: number = 2.0
   ): Promise<any> {
     // Parse spell early so it's available in error handler
+    // IMPORTANT: This spell YAML should already have corrected app_vk (for redeem/transfer)
+    // or correct app_vk from the start (for mint)
     let spellObj: any;
     try {
       spellObj = yaml.load(spellYaml);
+      console.log(`📋 Parsed spell YAML - apps: ${JSON.stringify(spellObj.apps || {})}`);
       
       // Comprehensive spell structure validation before sending to Prover API
       // Based on: https://docs.charms.dev/references/spell-json/
@@ -593,9 +597,23 @@ export class CharmsService {
       
       // Build binaries object
       // Per official documentation: https://docs.charms.dev/guides/wallet-integration/transactions/prover-api/
-      // The Prover API requires binaries - the key should match the app ID from the spell's apps field
-      // Error shows it's looking for: "n/identity/vk" format (full app ID from spell)
+      // The Prover API requires binaries in flat structure: { VK: base64Wasm }
+      // Per documentation: "binaries: { app VK (hex-encoded 32 bytes) to app binary }"
+      // Key: VK (app_vk) - 64-character hex string (32 bytes hex-encoded)
+      // Value: base64 encoded WASM string
       const binaries: Record<string, string> = {};
+      
+      // Ensure we have the actual WASM VK before building binaries
+      // This is critical to ensure the binary key matches the actual WASM VK
+      if (appBin && !this.appVk) {
+        try {
+          this.appVk = await this.getAppVk();
+          console.log(`✅ Retrieved WASM VK for binary mapping: ${this.appVk.substring(0, 16)}...`);
+        } catch (vkError: any) {
+          console.warn(`⚠️ Could not get WASM VK: ${vkError.message}`);
+          console.warn(`   Will use VK from spell, but this may cause mismatches`);
+        }
+      }
       
       if (appBin) {
         try {
@@ -642,27 +660,68 @@ export class CharmsService {
           const wasmBuffer = await fs.readFile(resolvedAppBin);
           const base64Wasm = wasmBuffer.toString('base64');
           
-          // The Prover API expects binaries keyed by the app ID from the spell's apps field
-          // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects: "n/<app_id>" (without app_vk)
-          // Example: apps.$00 = "n/identity/vk" -> binaries["n/identity"] = base64_wasm
+          // Validate binary is not empty
+          if (!base64Wasm || base64Wasm.length === 0) {
+            throw new Error(`WASM binary is empty after reading from ${resolvedAppBin}`);
+          }
+          
+          // Validate binary has reasonable size (at least 1KB base64 = ~750 bytes WASM)
+          if (base64Wasm.length < 1000) {
+            throw new Error(`WASM binary seems too small (${base64Wasm.length} chars base64). Expected at least 1KB.`);
+          }
+          
+          console.log(`✅ Loaded WASM binary: ${base64Wasm.length} chars base64 (${Math.round(wasmBuffer.length / 1024)}KB raw)`);
+          console.log(`📁 WASM file path: ${resolvedAppBin}`);
+          console.log(`📁 WASM file size: ${wasmBuffer.length} bytes`);
+          console.log(`📁 WASM file modified: ${(await fs.stat(resolvedAppBin)).mtime.toISOString()}`);
+          
+          // The Prover API expects binaries keyed by the VK (app_vk) - 64-character hex string
+          // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects binary key: "<app_vk>" (64-char hex)
+          // NOTE: spellObj is parsed from spellYaml, which should have corrected app_vk for redeem/transfer
+          console.log(`📦 Building binaries object with VK (app_vk) as keys per documentation...`);
+          console.log(`   Spell apps from parsed YAML: ${JSON.stringify(spellObj.apps || {})}`);
+          console.log(`   Actual WASM VK: ${this.appVk ? this.appVk.substring(0, 16) + '...' : 'NOT SET'}`);
+          console.log(`   Full WASM VK: ${this.appVk || 'NOT SET'}`);
+          
           if (spellObj.apps && typeof spellObj.apps === 'object') {
             for (const appId of Object.values(spellObj.apps)) {
               const appIdStr = String(appId);
-              // Extract only the APP_ID hex string (no n/ prefix or VK)
-              // Spell format: "n/<app_id>/<app_vk>" -> Prover API expects key: just "<app_id>" (64-char hex)
-              // The error "expected 64 hex characters" confirms the key must be just the hex string
               const parts = appIdStr.split('/');
+              
+              // Extract VK (app_vk) from the full format "n/<app_id>/<app_vk>"
+              // Prover API expects flat structure: { VK: base64Wasm } per documentation
+              // Format: { "<app_vk>": "<base64 wasm>" } - just VK as key, no nesting, no prefix
               if (parts.length >= 3) {
-                // Format: "n/<app_id>/<app_vk>" -> Prover API expects key: just "<app_id>" (64-char hex)
-                // Extract only the APP_ID (parts[1]) - the 64-character hex string
-                const binaryKey = parts[1]; // Just the APP_ID hex string
-                binaries[binaryKey] = base64Wasm;
-                console.log(`✅ Added binary for app: ${binaryKey} (extracted from: ${appIdStr.substring(0, 50)}...)`);
+                const appVk = parts[2]; // VK (app_vk) - 64-char hex (32 bytes hex-encoded)
+                
+                // CRITICAL: Verify this VK matches the actual WASM VK
+                // If they don't match, use the actual WASM VK to ensure correctness
+                const actualWasmVk = this.appVk;
+                if (actualWasmVk && appVk !== actualWasmVk) {
+                  console.warn(`⚠️ VK mismatch detected: spell VK=${appVk.substring(0, 16)}..., WASM VK=${actualWasmVk.substring(0, 16)}...`);
+                  console.warn(`   Using actual WASM VK for binary key to ensure match`);
+                  // Use actual WASM VK instead of spell VK
+                  binaries[actualWasmVk] = base64Wasm;
+                  console.log(`✅ Added binary for WASM VK: ${actualWasmVk} (corrected from spell VK: ${appVk.substring(0, 16)}...)`);
+                } else {
+                  binaries[appVk] = base64Wasm;
+                  if (actualWasmVk) {
+                    console.log(`✅ Added binary for app VK: ${appVk} (matches WASM VK)`);
+                  } else {
+                    console.log(`✅ Added binary for app VK: ${appVk} (extracted from: ${appIdStr.substring(0, 50)}...)`);
+                  }
+                }
               } else if (parts.length === 2) {
-                // Fallback: if format is "n/<app_id>" (missing app_vk), use parts[1]
-                const binaryKey = parts[1];
-                binaries[binaryKey] = base64Wasm;
-                console.log(`✅ Added binary for app: ${binaryKey} (extracted from: ${appIdStr.substring(0, 50)}...)`);
+                // Format: "n/<app_id>" (missing app_vk) - use instance VK if available
+                const appId = parts[1];
+                const appVk = this.appVk || '';
+                if (appVk) {
+                  binaries[appVk] = base64Wasm;
+                  console.log(`✅ Added binary for app VK: ${appVk} (using instance VK for app_id: ${appId})`);
+                } else {
+                  console.warn(`⚠️ No VK available for app_id ${appId}, cannot create binary mapping without VK`);
+                  console.warn(`   Expected format: n/<app_id>/<app_vk> with VK in spell`);
+                }
               } else {
                 // Fallback: use full string if format is unexpected
                 console.warn(`⚠️ Unexpected app ID format: ${appIdStr}, using as-is`);
@@ -670,27 +729,33 @@ export class CharmsService {
               }
             }
           } else {
-            // Fallback: if we can't find app IDs, use the VK as key
+            // Fallback: if we can't find app IDs, use instance VK
             if (this.appVk) {
               binaries[this.appVk] = base64Wasm;
-              console.log(`✅ Added binary using VK as key: ${this.appVk.substring(0, 16)}...`);
+              console.log(`✅ Added binary using instance VK: ${this.appVk.substring(0, 16)}...`);
+            } else {
+              console.warn(`⚠️ No app IDs found in spell.apps and no instance VK available`);
             }
           }
           
-          console.log(`✅ Binaries object populated with ${Object.keys(binaries).length} entry/entries (WASM size: ${base64Wasm.length} chars base64)`);
+          const totalVks = Object.values(binaries).reduce((sum, vkMap) => sum + (typeof vkMap === 'object' && vkMap !== null ? Object.keys(vkMap).length : 0), 0);
+          console.log(`✅ Binaries object populated with ${Object.keys(binaries).length} app_id(s), ${totalVks} VK mapping(s) (WASM size: ${base64Wasm.length} chars base64)`);
           
           // Validate that all app IDs from spell have corresponding binaries
           if (spellObj.apps && typeof spellObj.apps === 'object') {
             const spellAppIds = Object.values(spellObj.apps);
             const binaryKeys = Object.keys(binaries);
-            
+
             // Check for missing binaries
-            // Extract APP_ID hex string for comparison (same logic as binary key generation)
+            // Extract VK (app_vk) from full format for comparison (matches binary key generation)
             const missingBinaries = spellAppIds.filter((appId: any) => {
               const appIdStr = String(appId);
-              // Extract APP_ID hex string from full format (n/<app_id>/<app_vk>)
               const parts = appIdStr.split('/');
-              const binaryKey = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : appIdStr);
+              // Extract VK (app_vk) from full format "n/<app_id>/<app_vk>" - this is the binary key
+              const binaryKey = parts.length >= 3 ? parts[2] : (parts.length === 2 ? (this.appVk || '') : appIdStr);
+              if (!binaryKey) {
+                return true; // Missing VK
+              }
               return !binaries[binaryKey];
             });
             
@@ -711,16 +776,28 @@ export class CharmsService {
             console.log(`📋 Binary mapping verification:`);
             Object.entries(spellObj.apps).forEach(([key, appId]: [string, any]) => {
               const appIdStr = String(appId);
-              // Extract binary key (same logic as when building binaries object)
               const parts = appIdStr.split('/');
-              const binaryKey = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : appIdStr);
-              const hasBinary = !!binaries[binaryKey];
-              const binaryLength = binaries[binaryKey] ? String(binaries[binaryKey]).length : 0;
-              console.log(`   ${key}: ${appIdStr.substring(0, 50)}... -> binary key: ${binaryKey} -> ${hasBinary ? `✅ included (${binaryLength} chars)` : '❌ MISSING'}`);
+              // Extract VK (app_vk) from full format "n/<app_id>/<app_vk>" - this is the binary key
+              const binaryKey = parts.length >= 3 ? parts[2] : (parts.length === 2 ? (this.appVk || '') : appIdStr);
+              const hasBinary = binaryKey ? !!binaries[binaryKey] : false;
+              const binaryLength = binaryKey && binaries[binaryKey] ? String(binaries[binaryKey]).length : 0;
+              const keyInfo = binaryKey ? `VK: ${binaryKey}` : 'VK: MISSING';
+              console.log(`   ${key}: ${appIdStr.substring(0, 80)}... -> binary key (${keyInfo}) -> ${hasBinary ? `✅ included (${binaryLength} chars)` : '❌ MISSING'}`);
             });
             
             if (missingBinaries.length === 0 && !mockMode) {
               console.log(`✅ All spell app IDs have corresponding binaries (${spellAppIds.length} app ID(s) validated)`);
+              
+              // For redeem, we need binaries for both NFT ($00) and Token ($01) apps
+              const hasNftApp = Object.values(spellObj.apps).some((app: any) => String(app).startsWith('n/'));
+              const hasTokenApp = Object.values(spellObj.apps).some((app: any) => String(app).startsWith('t/'));
+              
+              if (hasNftApp && hasTokenApp && !mockMode) {
+                console.log(`📋 Redeem operation detected: NFT + Token apps both require binaries`);
+                console.log(`   Both apps share the same VK (same app instance) - binary keyed by VK`);
+                // Both should use the same VK (same app instance)
+                // Validation already checks all apps have binaries above
+              }
             }
           }
         } catch (binError: any) {
@@ -751,7 +828,8 @@ export class CharmsService {
       }
       
       if (mockMode) {
-        console.log(`ℹ️ Mock mode enabled - binaries: ${Object.keys(binaries).length > 0 ? `${Object.keys(binaries).length} entry/entries` : 'empty (will cause errors)'}`);
+        const totalVks = Object.values(binaries).reduce((sum, vkMap) => sum + (typeof vkMap === 'object' && vkMap !== null ? Object.keys(vkMap).length : 0), 0);
+        console.log(`ℹ️ Mock mode enabled - binaries: ${Object.keys(binaries).length > 0 ? `${Object.keys(binaries).length} app_id(s), ${totalVks} VK mapping(s)` : 'empty (will cause errors)'}`);
       }
       
       // Ensure version is 8 in the spell object (not at top level per reference implementation)
@@ -771,6 +849,13 @@ export class CharmsService {
         ins: spellObj.ins,
         outs: spellObj.outs,
       };
+      
+      // Include public_inputs if present (needed for redeem operations)
+      // Even though contract checks x == empty, Prover API/WASM runtime may require this field
+      if (spellObj.public_inputs) {
+        cleanSpell.public_inputs = spellObj.public_inputs;
+        console.log('✅ Including public_inputs in spell (required for state transition operations)');
+      }
       
       // Always include private_inputs if present in spell
       // It's optional per docs but needed for minting operations (see mint-nft.yaml example)
@@ -837,29 +922,52 @@ export class CharmsService {
       console.log(`   Spell version: ${payload.spell?.version || 'NOT SET'}`);
       console.log(`   Chain: ${payload.chain || 'NOT SET'}`);
       console.log(`   Mock mode: ${mockMode} (using empty binaries object {} per official docs)`);
+      console.log(`   📤 Sending to Prover API: ${this.proverUrl}`);
       
       // Detailed binary logging
       const binaryKeys = Object.keys(payload.binaries || {});
       const spellAppIds = spellObj.apps ? Object.values(spellObj.apps).map((id: any) => String(id)) : [];
-      // Extract binary keys for logging (same format as what we send to Prover API)
+      // Binary keys use flat structure: { VK: base64Wasm } per documentation
+      // Extract VK (app_vk) from spell app identifiers for comparison
       const binaryKeysFromSpell = spellAppIds.map((id: string) => {
         const parts = id.split('/');
-        // Extract only the APP_ID hex string (parts[1]) from "n/<app_id>/<app_vk>"
-        return parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : id);
-      });
+        // Extract only the VK (app_vk) (parts[2]) from "n/<app_id>/<app_vk>"
+        return parts.length >= 3 ? parts[2] : (parts.length === 2 ? (this.appVk || '') : id);
+      }).filter(vk => vk); // Filter out empty VKs
+      
+      console.log(`   📦 Binary Key Format: Using VK (app_vk) as key per documentation`);
       console.log(`   Binaries: ${binaryKeys.length > 0 ? `${binaryKeys.length} entry/entries` : 'empty object {}'}`);
-      if (binaryKeys.length > 0) {
-        console.log(`   Binary keys provided: ${binaryKeys.map(k => k.substring(0, 30) + '...').join(', ')}`);
+      
+      // Log flat structure
+      if (payload.binaries && Object.keys(payload.binaries).length > 0) {
+        binaryKeys.forEach((key, idx) => {
+          const binaryValue = payload.binaries[key];
+          const binarySize = typeof binaryValue === 'string' ? binaryValue.length : 0;
+          console.log(`   Binary key ${idx + 1} (VK): ${key} (${binarySize} chars base64)`);
+        });
       }
+      
       if (spellAppIds.length > 0) {
-        console.log(`   Spell app IDs (full format): ${spellAppIds.map(id => id.substring(0, 30) + '...').join(', ')}`);
-        console.log(`   Binary keys required (extracted): ${binaryKeysFromSpell.map(k => k.substring(0, 30) + '...').join(', ')}`);
-        // Check if all extracted binary keys have binaries
-        const missing = binaryKeysFromSpell.filter(key => !binaryKeys.includes(key));
+        console.log(`   Spell app IDs (full format): ${spellAppIds.map(id => id.substring(0, 60) + '...').join(', ')}`);
+        // Log full spell app IDs and extracted VKs for comparison
+        spellAppIds.forEach((id, idx) => {
+          const parts = id.split('/');
+          const extractedVk = parts.length >= 3 ? parts[2] : (parts.length === 2 ? (this.appVk || 'MISSING') : id);
+          const extractedAppId = parts.length >= 3 ? parts[1] : (parts.length === 2 ? parts[1] : 'N/A');
+          console.log(`   Spell app ID ${idx + 1}: ${id.substring(0, 60)}... -> app_id: ${extractedAppId}, VK: ${extractedVk.substring(0, 20)}...`);
+        });
+        console.log(`   Binary keys required (VK extracted): ${binaryKeysFromSpell.map(k => k.substring(0, 20) + '...').join(', ')}`);
+        // Check if all binary keys have binaries (using VK comparison)
+        const missing = binaryKeysFromSpell.filter(key => key && !binaryKeys.includes(key));
         if (missing.length > 0 && !mockMode) {
-          console.error(`   ❌ MISSING binaries for keys: ${missing.map(k => k.substring(0, 30) + '...').join(', ')}`);
-        } else if (missing.length === 0 && !mockMode) {
-          console.log(`   ✅ All required binary keys have binaries`);
+          console.error(`   ❌ MISSING binaries for VKs: ${missing.map(k => k.substring(0, 20) + '...').join(', ')}`);
+          console.error(`   Expected format: 64-character hex string (VK/app_vk per documentation)`);
+          missing.forEach((key, idx) => {
+            console.error(`   Missing VK ${idx + 1}: ${key}`);
+          });
+        } else if (missing.length === 0 && !mockMode && binaryKeysFromSpell.length > 0) {
+          console.log(`   ✅ All required binary keys have binaries (using VK format per documentation)`);
+          console.log(`   ✅ Binary key format matches Prover API requirements - ready to send`);
         }
       }
       
@@ -941,6 +1049,32 @@ export class CharmsService {
       console.log(`   Spell version: ${payload.spell?.version || 'MISSING'}`);
       console.log(`   Chain: ${payload.chain || 'MISSING'}`);
       console.log(`   prev_txs array length: ${payload.prev_txs?.length || 0}`);
+      
+      // Log spell structure for redeem debugging
+      if (payload.spell?.ins && payload.spell.ins.length > 0) {
+        const firstInput = payload.spell.ins[0];
+        console.log('🔍 SPELL INPUT DEBUG:');
+        console.log(`   UTXO ID: ${firstInput.utxo_id}`);
+        if (firstInput.charms?.['$00']) {
+          const nft = firstInput.charms['$00'];
+          console.log(`   NFT remaining_balance: ${nft.remaining_balance}`);
+          console.log(`   NFT initial_amount: ${nft.initial_amount}`);
+        }
+        if (firstInput.charms?.['$01']) {
+          console.log(`   Token amount ($01): ${firstInput.charms['$01']}`);
+        }
+      }
+      if (payload.spell?.outs && payload.spell.outs.length > 0) {
+        console.log('🔍 SPELL OUTPUT DEBUG:');
+        payload.spell.outs.forEach((out: any, idx: number) => {
+          console.log(`   Output ${idx + 1}:`);
+          console.log(`     Address: ${out.address?.substring(0, 20)}...`);
+          console.log(`     Has NFT ($00): ${out.charms?.['$00'] ? 'YES' : 'NO'}`);
+          if (out.charms?.['$01']) {
+            console.log(`     Token amount ($01): ${out.charms['$01']}`);
+          }
+        });
+      }
       console.log(`   prev_txs type: ${Array.isArray(payload.prev_txs) ? 'array of enum variant objects [{ bitcoin: "hex" }]' : typeof payload.prev_txs}`);
       
       if (payload.prev_txs && payload.prev_txs.length > 0) {
@@ -990,12 +1124,12 @@ export class CharmsService {
         });
       }
       
-      // Log binaries structure
+      // Log binaries structure (flat format: { APP_ID: base64Wasm })
       console.log(`   Binaries: ${Object.keys(payload.binaries || {}).length} entry/entries`);
       if (payload.binaries && Object.keys(payload.binaries).length > 0) {
-        Object.entries(payload.binaries).forEach(([appVk, binary]: [string, any]) => {
+        Object.entries(payload.binaries).forEach(([appId, binary]: [string, any]) => {
           const binaryValue = typeof binary === 'string' ? (binary.length > 0 ? `${binary.substring(0, 20)}... (${binary.length} chars)` : 'empty string') : JSON.stringify(binary);
-          console.log(`     - ${appVk.substring(0, 16)}...: ${binaryValue}`);
+          console.log(`     - App ID: ${appId.substring(0, 16)}...: ${binaryValue}`);
         });
       } else {
         console.log(`     - Binaries object is empty`);
@@ -1268,12 +1402,58 @@ export class CharmsService {
       }, null, 2));
       
       const apiRequestStart = Date.now();
-      const response = await axios.post(this.proverUrl, payload, {
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        timeout: 180000, // 180 seconds (3 minutes) timeout for proof generation
-      });
+      
+      // Retry logic with exponential backoff for network/timeout errors
+      const maxRetries = 3;
+      const retryDelays = [30000, 60000, 90000]; // 30s, 60s, 90s
+      let lastError: any = null;
+      let response: any = null;
+      
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          if (attempt > 0) {
+            console.log(`   🔄 Retry attempt ${attempt + 1}/${maxRetries} after ${retryDelays[attempt - 1] / 1000}s delay...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelays[attempt - 1]));
+          }
+          
+          response = await axios.post(this.proverUrl, payload, {
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            timeout: 180000, // 180 seconds (3 minutes) timeout for proof generation
+          });
+          
+          // Success - break out of retry loop
+          if (attempt > 0) {
+            console.log(`   ✅ Request succeeded on attempt ${attempt + 1}`);
+          }
+          break;
+        } catch (retryError: any) {
+          lastError = retryError;
+          const isRetryableError = 
+            retryError.code === 'ETIMEDOUT' ||
+            retryError.code === 'ECONNABORTED' ||
+            retryError.code === 'ECONNREFUSED' ||
+            retryError.code === 'ENOTFOUND' ||
+            retryError.code === 'ECONNRESET' ||
+            (retryError.message && retryError.message.includes('timeout')) ||
+            (!retryError.response && retryError.request); // Network error without response
+          
+          if (isRetryableError && attempt < maxRetries - 1) {
+            console.warn(`   ⚠️  Request failed (attempt ${attempt + 1}/${maxRetries}): ${retryError.code || retryError.message}`);
+            console.warn(`   Will retry in ${retryDelays[attempt] / 1000}s...`);
+            continue;
+          } else {
+            // Not retryable or last attempt - throw the error
+            throw retryError;
+          }
+        }
+      }
+      
+      if (!response) {
+        throw lastError || new Error('Failed to get response from Prover API after retries');
+      }
+      
       const apiRequestDuration = Date.now() - apiRequestStart;
       const totalApiDuration = Date.now() - apiStartTime;
       console.log(`   ⏱️  API request: ${apiRequestDuration}ms (${(apiRequestDuration / 1000).toFixed(1)}s)`);
@@ -1355,12 +1535,65 @@ export class CharmsService {
         broadcasted: true, // Indicates Prover API already broadcast
       };
     } catch (error: any) {
-      // Handle timeout errors
-      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
-        console.error('❌ Prover API request timed out after 180 seconds');
-        console.error('   Proof generation is taking longer than expected.');
-        console.error('   This may be due to network issues or high server load.');
-        throw new Error('Proof generation timed out after 3 minutes. The Prover API may be slow or overloaded. Please try again.');
+      // Log ALL errors immediately for debugging
+      console.error('🔴 CAUGHT ERROR IN generateProof:');
+      console.error('   Error type:', typeof error);
+      console.error('   Error name:', error?.name);
+      console.error('   Error message:', error?.message);
+      console.error('   Error code:', error?.code);
+      console.error('   Has response:', !!error?.response);
+      if (error?.response) {
+        console.error('   Response status:', error.response.status);
+        console.error('   Response data:', JSON.stringify(error.response.data).substring(0, 500));
+      }
+      console.error('   Full error:', JSON.stringify(error, Object.getOwnPropertyNames(error)).substring(0, 1000));
+      
+      // Handle timeout and network errors with enhanced messaging
+      if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+        const isConnectionTimeout = error.code === 'ETIMEDOUT' && !error.response;
+        const isRequestTimeout = error.code === 'ECONNABORTED' || (error.code === 'ETIMEDOUT' && error.response);
+        
+        if (isConnectionTimeout) {
+          console.error('❌ Prover API connection timed out');
+          console.error('   The connection to the Prover API could not be established within the timeout period.');
+          console.error('   This may indicate:');
+          console.error('   - Network connectivity issues');
+          console.error('   - Prover API server is down or unreachable');
+          console.error('   - Firewall or DNS resolution problems');
+          console.error('   - The Prover API endpoint may be incorrect');
+          throw new Error(
+            'Connection to Prover API timed out. This could be due to network issues or the Prover API being unavailable. ' +
+            'Please check your internet connection and try again. If the problem persists, the Prover API may be experiencing issues.'
+          );
+        } else if (isRequestTimeout) {
+          console.error('❌ Prover API request timed out after 180 seconds');
+          console.error('   The request was sent but the Prover API did not respond in time.');
+          console.error('   This may be due to:');
+          console.error('   - High server load on the Prover API');
+          console.error('   - Complex proof generation taking longer than expected');
+          console.error('   - Network latency issues');
+          throw new Error(
+            'Prover API request timed out after 3 minutes. The proof generation may be taking longer than expected, ' +
+            'or the Prover API may be experiencing high load. Please try again in a few moments.'
+          );
+        } else {
+          console.error('❌ Prover API timeout error');
+          console.error('   Error code:', error.code);
+          throw new Error('Prover API request timed out. Please try again.');
+        }
+      }
+      
+      // Handle other network errors
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'ECONNRESET') {
+        console.error(`❌ Prover API network error (${error.code})`);
+        console.error('   Unable to connect to the Prover API.');
+        console.error('   This may indicate:');
+        console.error('   - The Prover API server is down');
+        console.error('   - Network connectivity issues');
+        console.error('   - DNS resolution problems');
+        throw new Error(
+          `Unable to connect to Prover API (${error.code}). Please check your network connection and verify the Prover API is accessible.`
+        );
       }
       
       // Enhanced error handling for 422 errors
@@ -1437,6 +1670,7 @@ export class CharmsService {
           const errorMessage = typeof errorData === 'string' 
             ? errorData 
             : (errorData?.error || errorData?.message || JSON.stringify(errorData));
+          
           throw new Error(`Prover API bad request (400): ${errorMessage}. Check funding_utxo_value and all required parameters.`);
         }
         
@@ -1450,7 +1684,9 @@ export class CharmsService {
         throw new Error(`Prover API error (${status}): ${JSON.stringify(errorData)}`);
       }
       
-      throw new Error(`Failed to generate proof: ${error.message}`);
+      // Non-HTTP errors (network errors, etc.)
+      const errorMsg = error?.message || error?.response?.data?.error || error?.response?.data?.message || String(error);
+      throw new Error(`Failed to generate proof: ${errorMsg}`);
     }
   }
 

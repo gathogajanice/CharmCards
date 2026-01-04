@@ -248,6 +248,7 @@ export default function BurnGiftCardModal({ isOpen, onClose, giftCard }: BurnGif
                 error={txError}
                 commitTxid={commitTxid}
                 spellTxid={spellTxid}
+                type="burn"
               />
             </div>
           )}

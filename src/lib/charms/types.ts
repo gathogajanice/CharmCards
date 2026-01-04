@@ -21,7 +21,8 @@ export interface SpellOutput {
 export interface Spell {
   version: number;
   apps: Record<string, string>; // Format: "$00": "n/<app_id>/<app_vk>" or "t/<app_id>/<app_vk>"
-  private_inputs?: Record<string, string>;
+  public_inputs?: Record<string, any>; // Optional public inputs for app contract execution
+  private_inputs?: Record<string, string>; // Optional private inputs (e.g., funding UTXO for minting)
   ins: SpellInput[];
   outs: SpellOutput[];
 }
@@ -67,6 +68,7 @@ export interface CharmsAsset {
   app_vk: string;
   data?: GiftCardNftMetadata;
   amount?: number; // For tokens
+  utxoId?: string; // UTXO ID in format "txid:vout"
 }
 
 export interface WalletCharms {

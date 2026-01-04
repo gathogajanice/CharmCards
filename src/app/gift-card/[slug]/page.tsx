@@ -102,7 +102,7 @@ const giftCardData: Record<string, {
   'expedia-us': {
     name: 'Expedia',
     description: 'Book flights, hotels, car rentals, and vacation packages. Use your Bitcoin NFT gift card to plan your next trip.',
-    image: 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7f/Expedia_logo.svg/2560px-Expedia_logo.svg.png',
+    image: 'https://logos-world.net/wp-content/uploads/2020/11/Expedia-Logo.png',
     denominations: [25, 50, 100, 200, 500, 1000],
     customRange: { min: 25, max: 1000 },
     country: 'US',
